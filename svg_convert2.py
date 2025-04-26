@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 
-import os, sys
-from svglib.svglib import svg2rlg
+import os
+import sys
+
 from reportlab.graphics import renderPM
+from svglib.svglib import svg2rlg
 
 for infile in sys.argv[1:]:
     file, ext = os.path.splitext(infile)

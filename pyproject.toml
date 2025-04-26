@@ -1,0 +1,10 @@
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.format]
+skip-magic-trailing-comma = false
+docstring-code-format = true
+
+[tool.ruff.lint]
+# https://docs.astral.sh/ruff/linter/#rule-selection
+select = ["E", "F", "UP", "B", "SIM", "I"]

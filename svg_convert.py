@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 
-import os, sys
+import os
+import sys
+
 from cairosvg import svg2png
 
 for infile in sys.argv[1:]:

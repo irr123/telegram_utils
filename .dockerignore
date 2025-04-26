@@ -1,0 +1,15 @@
+**/*.py[cod]
+**/__pycache__/
+.docker
+.dockerignore
+.env
+.git
+.gitattributes
+.gitignore
+.pytest_cache/
+.venv/
+Dockerfile
+docker-compose.yml
+venv/
+my.session
+credentials.json

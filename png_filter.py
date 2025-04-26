@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 
-import os, sys
+import os
+import sys
+
 from PIL import Image, ImageFilter
 
 for infile in sys.argv[1:]:
@@ -10,6 +12,6 @@ for infile in sys.argv[1:]:
             im = im.filter(ImageFilter.EDGE_ENHANCE)
             im = im.filter(ImageFilter.SHARPEN)
 
-            im.save(file+"f"+ext, "PNG")
+            im.save(file + "f" + ext, "PNG")
         except Exception as e:
             print(infile, e)
