@@ -1,5 +1,6 @@
 import asyncio
 import datetime as dt
+import json
 import os
 
 import google
@@ -108,26 +109,60 @@ async def main():
         await tg.run_until_disconnected()
 
 
-PROMPT = """**Role:** You are an AI assistant specialized in extracting specific date information from text posts.
+PROMPT_TEMPLATE = """**Role:** AI assistant for extracting scheduled events, current activities, and suggestions.
 
-**Task:** Analyze the provided text post to determine if it announces a specific, scheduled **future event** (like a lecture, meeting, workshop, etc.). Your goal is to extract the date of this event and format it strictly as YYYY-MM-DD.
+**Task:** Identify future scheduled events, current activities, or suggestions mentioned in the text. Extract or assign a date (YYYY-MM-DD) and create a brief summary for each item. Output ONLY a JSON list: `[{{"date": "YYYY-MM-DD", "summary": "Item Summary"}}, ...]` or an empty list `[]` if no relevant items are found.
+
+**Reference Dates:**
+* Now Date (use for "now", "сейчас", "today"): {now_date_iso}
+* Weekend Start Date (use for "weekend", "выходные"): {weekend_start_date_iso}
+* Reference Date for Year Inference: {current_date_formatted}
 
 **Instructions:**
 
-1.  Read the text carefully.
-2.  Identify if the primary purpose of the text is to announce a **future scheduled event** that people can attend or participate in. Look for indicators like explicit future dates, times, locations, registration details, calls to attend, etc.
-3.  **Crucially distinguish** this from:
-    * News reports about **past events** (even if they have dates). The date mentioned in a news report about something that *already happened* should NOT be extracted.
-    * Mentions of dates related to historical context within the text (e.g., "In 1983...").
-    * General discussions without a specific scheduled meeting date.
-4.  If a **future scheduled event** is identified:
-    * Determine the full date (Day, Month, Year) of the event.
-    * **Year Inference:** If the year is not explicitly mentioned, infer it based on the current date (**April 26, 2025**). Assume it's the current year (2025) if the date hasn't passed yet, or the next year (2026) if the date has already passed in 2025 relative to the current date. If the text provides an explicit year for the future event, use that year.
-    * Convert the identified month name (e.g., "апреля", "April") to its corresponding two-digit number (e.g., 04).
-    * Format the final date strictly as **YYYY-MM-DD**.
-    * Output **only** this date string and nothing else.
-5.  If the text **does not** announce a future scheduled event (it's a news report about a past event, historical info, general discussion, etc.):
-    * Output the exact string: **N/A**"""  # noqa: E501
+1.  **Identify Items:** Find mentions of:
+    * Specific, scheduled **future events** with explicit dates (Day, Month).
+    * **Current activities or suggestions** linked to terms like "now", "сейчас", "today".
+    * **Activities or suggestions** linked to "weekend", "выходные".
+2.  **Exclude:** Ignore *only* past events (with dates clearly before {now_date_iso}) and purely historical date references. *Do not* exclude items just because they use "now" or "weekend".
+3.  **For Each Found Item:**
+    * **a. Determine Date Source:** Check if the text provides an explicit Day-Month, uses keywords for "now" (like "now", "сейчас", "today"), or keywords for "weekend" (like "weekend", "выходные"). Prioritize explicit dates if available for a specific phrase.
+    * **b. Assign Base Date:**
+        * If an explicit Day-Month is found for the item: Use that specific Day-Month.
+        * If "now"/"сейчас"/"today" keywords are associated with the item: Use the **Now Date** (`{now_date_iso}`). Determine the Day-Month from this date.
+        * If "weekend"/"выходные" keywords are associated with the item: Use the **Weekend Start Date** (`{weekend_start_date_iso}`). Determine the Day-Month from this date.
+        * If none of these apply (e.g., just a general statement with no time reference), skip the item.
+    * **c. Infer Year (using Day-Month from step 3b):**
+        * If an explicit year is mentioned in the text *for that specific item*, use it.
+        * Otherwise, compare the item's Month-Day (from 3b) to **{current_month_day_formatted}**:
+            * If the Month-Day is on or after **{current_month_day_formatted}**, use the current year: **{current_year}**.
+            * If the Month-Day is before **{current_month_day_formatted}**, use the next year: **{next_year}**.
+    * **d. Format Final Date:** Combine the Day-Month from step 3b and the Year from step 3c into **YYYY-MM-DD** format. Use the specific assigned dates (`{now_date_iso}`, `{weekend_start_date_iso}`) directly when applicable as the final date.
+    * **e. Create Summary:** Write a brief, concise summary of the event, activity, or suggestion (e.g., "Cleanup action 'Zasuči rukave'", "Observe cauliflory", "Walk in Botanical Garden").
+    * **f. Create JSON Object:** Structure as `{{"date": "YYYY-MM-DD", "summary": "Your summary"}}`.
+4.  **Compile List:** Collect all JSON objects from step 3f into a single JSON list.
+5.  **Output:**
+    * If items were found, output the JSON list. Example: `[ {{"date": "{now_date_iso}", "summary": "Observe cauliflory"}}, {{"date": "{weekend_start_date_iso}", "summary": "Walk in Botanical Garden"}}, {{"date": "{current_year}-07-07", "summary": "Belgrade-Subotica railway opening"}} ]`
+    * If no items were found, output an empty JSON list: `[]`.
+    * **Output ONLY the JSON list or `[]`, nothing else.**"""  # noqa: E501
+
+
+def make_prompt(date: dt.datetime) -> str:
+    base_dt = date.date()
+
+    days_until_saturday = (5 - base_dt.weekday() + 7) % 7
+    if days_until_saturday == 0:
+        days_until_saturday = 7
+    weekend_start = base_dt + dt.timedelta(days=days_until_saturday)
+
+    return PROMPT_TEMPLATE.format(
+        current_year=base_dt.year,
+        next_year=base_dt.year + 1,
+        current_date_formatted=base_dt.strftime("%B %d, %Y"),
+        current_month_day_formatted=base_dt.strftime("%b %d"),
+        now_date_iso=base_dt.isoformat(),
+        weekend_start_date_iso=weekend_start.isoformat(),
+    )
 
 
 async def _main(
@@ -152,12 +187,17 @@ async def _main(
             sender_name = getattr(sender, "username", "Unknown")
 
             print(f"{sender_name} 1: {message.message}")
-            _, completion = await gemini.complete(message.message, PROMPT)
+            prompt = make_prompt(message.date or dt.datetime.now())
+            _, completion = await gemini.complete(message.message, prompt)
+            completion = completion.removeprefix("```json").removesuffix("```")
             print(f"{sender_name} 2: {completion}")
             try:
-                ev_date = dt.datetime.strptime(completion, "%Y-%m-%d")
+                events = json.loads(completion)
             except Exception as e:
                 print(f"{sender_name}: {e}")
+                return
+
+            if not events:
                 return
 
             try:
@@ -166,16 +206,23 @@ async def _main(
                 print(f"{sender_name}: {e}")
                 return
 
-            summary = f"{sender_name}: {message.message[:32]}"
-            link = f"https://t.me/{dest_entity.username}/{forwarded.id}"
+            for event in events:
+                try:
+                    ev_date = dt.datetime.strptime(event["date"], "%Y-%m-%d")
+                except Exception as e:
+                    print(f"{sender_name}: {e}")
+                    continue
 
-            try:
-                ev = await calendar.publish(ev_date, summary, link)
-            except Exception as e:
-                print(f"{sender_name}: {e}")
-                return
+                summary = event.get("summary", f"{sender_name}: {message.message[:32]}")
+                link = f"https://t.me/{dest_entity.username}/{forwarded.id}"
 
-            print(f"{sender_name} 3: {ev}")
+                try:
+                    ev = await calendar.publish(ev_date, summary, link)
+                except Exception as e:
+                    print(f"{sender_name}: {e}")
+                    continue
+
+                print(f"{sender_name} 3: {ev}")
 
 
 if __name__ == "__main__":
