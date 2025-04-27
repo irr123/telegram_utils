@@ -44,16 +44,15 @@ class Gemini:
 
 
 class Calendar:
-    SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
-    SERVICE_ACCOUNT_FILE = "./credentials.json"
+    SCOPES = ("https://www.googleapis.com/auth/calendar.events",)
+    S_ACCOUNT_FILE = "./credentials.json"
 
     def __init__(self, cal_id: str):
         assert cal_id
         self._cal_id = cal_id
 
-        creds = Credentials.from_service_account_file(
-            self.SERVICE_ACCOUNT_FILE, scopes=self.SCOPES
-        )
+        creds_builder = Credentials.from_service_account_file
+        creds = creds_builder(self.S_ACCOUNT_FILE, scopes=self.SCOPES)
         self._client = build("calendar", "v3", credentials=creds)
 
     async def publish(self, ev_date: dt.datetime, summary: str, link: str):
@@ -100,6 +99,7 @@ async def main():
                 "https://t.me/CaoBeograd",
                 "https://t.me/vstrechi_v_belgrade",
                 "https://t.me/balkanoutdoor",
+                "https://t.me/dobardabar_books",
             ),
         )
 
@@ -127,9 +127,7 @@ PROMPT = """**Role:** You are an AI assistant specialized in extracting specific
     * Format the final date strictly as **YYYY-MM-DD**.
     * Output **only** this date string and nothing else.
 5.  If the text **does not** announce a future scheduled event (it's a news report about a past event, historical info, general discussion, etc.):
-    * Output the exact string: **N/A**
-
-**Input Text Post:**"""  # noqa: E501
+    * Output the exact string: **N/A**"""  # noqa: E501
 
 
 async def _main(
@@ -147,6 +145,9 @@ async def _main(
         @tg.on(events.NewMessage(chats=source_entity))
         async def handler(event: events.NewMessage.Event):
             message: tl.custom.message.Message = event.message
+            if not message or not message.message:
+                return
+
             sender = await message.get_sender()
             sender_name = getattr(sender, "username", "Unknown")
 
