@@ -81,7 +81,7 @@ async def main():
     api_hash = os.getenv("TG_API_HASH")
 
     async with TelegramClient("my", api_id, api_hash) as tg:
-        await _main(
+        await setup(
             tg,
             gemini,
             calendar,
@@ -109,6 +109,7 @@ async def main():
                 "https://t.me/vstrechi_v_belgrade",
                 "https://t.me/yc_connect",
                 "https://t.me/zarko_tusic",
+                "https://t.me/go_tara",
             ),
         )
 
@@ -173,7 +174,7 @@ def make_prompt(date: dt.datetime) -> str:
     )
 
 
-async def _main(
+async def setup(
     tg: TelegramClient,
     gemini: Gemini,
     calendar: Calendar,
