@@ -97,11 +97,13 @@ async def main():
                 "https://t.me/cofeek_vezde",
                 "https://t.me/debaty_belgrad",
                 "https://t.me/dobardabar_books",
+                "https://t.me/go_tara",
                 "https://t.me/ikonamitakikonami",
                 "https://t.me/kikirikirs",
+                "https://t.me/legiongamesrs",
                 "https://t.me/mapamagrus",
                 "https://t.me/obitaniya_sreda",
-                # "https://t.me/serbia_nalogi",
+                "https://t.me/pokerbelgradaa",
                 "https://t.me/sta_imas_beograd",
                 "https://t.me/standup_beo",
                 "https://t.me/tech_illumination",
@@ -109,7 +111,6 @@ async def main():
                 "https://t.me/vstrechi_v_belgrade",
                 "https://t.me/yc_connect",
                 "https://t.me/zarko_tusic",
-                "https://t.me/go_tara",
             ),
         )
 
