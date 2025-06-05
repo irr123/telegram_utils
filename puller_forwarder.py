@@ -101,6 +101,7 @@ async def main():
                 "https://t.me/ikonamitakikonami",
                 "https://t.me/kikirikirs",
                 "https://t.me/legiongamesrs",
+                "https://t.me/lepopishem",
                 "https://t.me/mapamagrus",
                 "https://t.me/obitaniya_sreda",
                 "https://t.me/pokerbelgradaa",
