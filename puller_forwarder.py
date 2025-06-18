@@ -111,7 +111,6 @@ async def main():
                 "https://t.me/tech_illumination",
                 "https://t.me/volna_srbjia",
                 "https://t.me/vstrechi_v_belgrade",
-                "https://t.me/yc_connect",
                 "https://t.me/zarko_tusic",
             ),
         )
