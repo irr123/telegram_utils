@@ -93,6 +93,7 @@ async def main():
                 "https://t.me/SerbiaInMyMind",
                 "https://t.me/adaptacija",
                 "https://t.me/afisha_rs",
+                "https://t.me/airsoft_serbia",
                 "https://t.me/balkanoutdoor",
                 "https://t.me/cofeek_vezde",
                 "https://t.me/debaty_belgrad",
