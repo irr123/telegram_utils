@@ -19,7 +19,7 @@ class Gemini:
         self,
         user_prompt: str,
         sys_prompt: str | None = None,
-        model: str = "gemini-2.0-flash",
+        model: str = "gemini-2.5-flash",
     ) -> tuple[GenerateContentResponse, str]:
         m = google.generativeai.GenerativeModel(model, system_instruction=sys_prompt)
 
