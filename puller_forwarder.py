@@ -135,9 +135,12 @@ PROMPT_TEMPLATE = """**Role:** AI assistant for extracting scheduled events, cur
 
 1.  **Identify Items:** Find mentions of:
     * Specific, scheduled **future events** with explicit dates (Day, Month).
-    * **Current activities or suggestions** linked to terms like "now", "сейчас", "today".
-    * **Activities or suggestions** linked to "weekend", "выходные".
-2.  **Exclude:** Ignore *only* past events (with dates clearly before {now_date_iso}) and purely historical date references. *Do not* exclude items just because they use "now" or "weekend".
+    * **Actionable** current activities or **participatory suggestions** (e.g., "go for a walk", "visit an exhibition") linked to terms like "now", "сейчас", "today".
+    * **Actionable** activities or **participatory suggestions** linked to "weekend", "выходные".
+2.  **Exclude:**
+    * Ignore *only* past events (with dates clearly before {now_date_iso}) and purely historical date references.
+    * **Exclude general calls to action, encouragements, or requests that are not tied to a specific, participatory activity. This includes donation requests, subscription prompts, or general statements of support (e.g., 'Support our project', 'Subscribe to our channel').**
+    * *Do not* exclude items just because they use "now" or "weekend" if they meet the criteria in step 1.
 3.  **For Each Found Item:**
     * **a. Determine Date Source:** Check if the text provides an explicit Day-Month, uses keywords for "now" (like "now", "сейчас", "today"), or keywords for "weekend" (like "weekend", "выходные"). Prioritize explicit dates if available for a specific phrase.
     * **b. Assign Base Date:**
