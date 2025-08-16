@@ -46,4 +46,4 @@ release: fmt lint
 	tar --exclude='./.git' \
 		-czvf /tmp/app.tar.gz .
 	rsync -avz --progress /tmp/app.tar.gz cryptopeer.trade:/root
-	# and on host: rm -rf /root/telegram_utils && tar -xzvf /root/app.tar.gz -C /root/telegram_utils
+	# and on host: rm -rf /root/telegram_utils/* && tar -xzvf /root/app.tar.gz -C /root/telegram_utils
