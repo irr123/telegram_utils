@@ -12,6 +12,7 @@ lint:
 run:
 	@TG_API_ID=$(TG_API_ID)\
 		TG_API_HASH=$(TG_API_HASH)\
+		SESSION=$(SESSION)\
 		GEMINI_API_KEY=$(GEMINI_API_KEY)\
 		CALENDAR_ID=$(CALENDAR_ID)\
 		python ./puller_forwarder.py
@@ -20,7 +21,7 @@ run:
 session:
 	@TG_API_ID=$(TG_API_ID)\
 		TG_API_HASH=$(TG_API_HASH)\
-		python ./store_tg_session.py
+		node ./puller_forwarder/store_tg_session.mjs
 
 
 IMAGE = tg_puller_forwarder
@@ -32,7 +33,6 @@ docker_run:
 		--name $(IMAGE)\
 		--restart always\
 		-v $(PWD)/.env:/opt/app/.env\
-		-v $(PWD)/my.session:/opt/app/my.session\
 		-v $(PWD)/credentials.json:/opt/app/credentials.json\
 		$(IMAGE) sh -c "cd /opt/app && make run"
 
@@ -40,3 +40,10 @@ docker_run:
 docker_stop:
 	docker stop $(IMAGE) || true
 	docker rm $(IMAGE)
+
+.PHONY: release
+release: fmt lint
+	tar --exclude='./.git' \
+		-czvf /tmp/app.tar.gz .
+	rsync -avz --progress /tmp/app.tar.gz cryptopeer.trade:/root
+	# and on host: rm -rf /root/telegram_utils && tar -xzvf /root/app.tar.gz -C /root/telegram_utils

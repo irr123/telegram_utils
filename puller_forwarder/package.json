@@ -1,0 +1,16 @@
+{
+  "name": "puller_forwarder",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "main": "index.mjs",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "input": "^1.0.1",
+    "telegram": "^2.26.22"
+  }
+}

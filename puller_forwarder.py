@@ -8,6 +8,7 @@ from google.generativeai.types.generation_types import GenerateContentResponse
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from telethon import TelegramClient, events, tl
+from telethon.sessions import StringSession
 
 
 class Gemini:
@@ -77,10 +78,11 @@ class Calendar:
 async def main():
     calendar = Calendar(os.getenv("CALENDAR_ID"))
     gemini = Gemini(os.getenv("GEMINI_API_KEY"))
+    session = StringSession(os.getenv("SESSION"))
     api_id = os.getenv("TG_API_ID")
     api_hash = os.getenv("TG_API_HASH")
 
-    async with TelegramClient("my", api_id, api_hash) as tg:
+    async with TelegramClient(session, api_id, api_hash) as tg:
         await setup(
             tg,
             gemini,
@@ -105,7 +107,7 @@ async def main():
                 "https://t.me/lepopishem",
                 "https://t.me/mapamagrus",
                 "https://t.me/obitaniya_sreda",
-                "https://t.me/pokerbelgradaa",
+                "https://t.me/poker_belgrade",
                 "https://t.me/sta_imas_beograd",
                 "https://t.me/standup_beo",
                 "https://t.me/tech_illumination",
