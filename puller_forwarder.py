@@ -20,7 +20,7 @@ class Gemini:
         self,
         user_prompt: str,
         sys_prompt: str | None = None,
-        model: str = "gemini-2.5-flash",
+        model: str = "gemini-2.5-flash-lite",
     ) -> tuple[GenerateContentResponse, str]:
         m = google.generativeai.GenerativeModel(model, system_instruction=sys_prompt)
 
@@ -123,54 +123,87 @@ async def main():
         await tg.run_until_disconnected()
 
 
-PROMPT_TEMPLATE = """**Role:** AI assistant for extracting scheduled events, current activities, and suggestions.
+PROMPT_TEMPLATE = """**Role:** AI assistant for extracting *public, participatory events* from text.
 
-**Task:** Identify future scheduled events, current activities, or suggestions mentioned in the text. Extract or assign a date (YYYY-MM-DD) and create a brief summary for each item. Output ONLY a JSON list: `[{{"date": "YYYY-MM-DD", "summary": "Item Summary"}}, ...]` or an empty list `[]` if no relevant items are found.
+**Task:** Identify publicly accessible, participatory events mentioned in the text. These are activities where a person can physically or virtually attend. Extract or assign a date (YYYY-MM-DD) and create a brief summary for each event. Output ONLY a JSON list: `[{{"date": "YYYY-MM-DD", "summary": "Item Summary"}}, ...]` or an empty list `[]` if no events are found.
 
 **Reference Dates:**
 * Now Date (use for "now", "сейчас", "today"): {now_date_iso}
 * Weekend Start Date (use for "weekend", "выходные"): {weekend_start_date_iso}
 * Reference Date for Year Inference: {current_date_formatted}
+* **Dates for This Week (use for "в понедельник", "on Tuesday", "в эту среду", etc.):**
+  * This Monday: {monday_iso}
+  * This Tuesday: {tuesday_iso}
+  * This Wednesday: {wednesday_iso}
+  * This Thursday: {thursday_iso}
+  * This Friday: {friday_iso}
+  * This Saturday: {saturday_iso}
+  * This Sunday: {sunday_iso}
 
 **Instructions:**
 
-1.  **Identify Items:** Find mentions of:
-    * Specific, scheduled **future events** with explicit dates (Day, Month).
-    * **Actionable** current activities or **participatory suggestions** (e.g., "go for a walk", "visit an exhibition") linked to terms like "now", "сейчас", "today".
-    * **Actionable** activities or **participatory suggestions** linked to "weekend", "выходные".
-2.  **Exclude:**
-    * Ignore *only* past events (with dates clearly before {now_date_iso}) and purely historical date references.
-    * **Exclude general calls to action, encouragements, or requests that are not tied to a specific, participatory activity. This includes donation requests, subscription prompts, or general statements of support (e.g., 'Support our project', 'Subscribe to our channel').**
-    * *Do not* exclude items just because they use "now" or "weekend" if they meet the criteria in step 1.
-3.  **For Each Found Item:**
-    * **a. Determine Date Source:** Check if the text provides an explicit Day-Month, uses keywords for "now" (like "now", "сейчас", "today"), or keywords for "weekend" (like "weekend", "выходные"). Prioritize explicit dates if available for a specific phrase.
-    * **b. Assign Base Date:**
-        * If an explicit Day-Month is found for the item: Use that specific Day-Month.
-        * If "now"/"сейчас"/"today" keywords are associated with the item: Use the **Now Date** (`{now_date_iso}`). Determine the Day-Month from this date.
-        * If "weekend"/"выходные" keywords are associated with the item: Use the **Weekend Start Date** (`{weekend_start_date_iso}`). Determine the Day-Month from this date.
-        * If none of these apply (e.g., just a general statement with no time reference), skip the item.
-    * **c. Infer Year (using Day-Month from step 3b):**
-        * If an explicit year is mentioned in the text *for that specific item*, use it.
-        * Otherwise, compare the item's Month-Day (from 3b) to **{current_month_day_formatted}**:
-            * If the Month-Day is on or after **{current_month_day_formatted}**, use the current year: **{current_year}**.
-            * If the Month-Day is before **{current_month_day_formatted}**, use the next year: **{next_year}**.
-    * **d. Format Final Date:** Combine the Day-Month from step 3b and the Year from step 3c into **YYYY-MM-DD** format. Use the specific assigned dates (`{now_date_iso}`, `{weekend_start_date_iso}`) directly when applicable as the final date.
-    * **e. Create Summary:** Write a brief, concise summary of the event, activity, or suggestion (e.g., "Cleanup action 'Zasuči rukave'", "Observe cauliflory", "Walk in Botanical Garden").
-    * **f. Create JSON Object:** Structure as `{{"date": "YYYY-MM-DD", "summary": "Your summary"}}`.
-4.  **Compile List:** Collect all JSON objects from step 3f into a single JSON list.
-5.  **Output:**
-    * If items were found, output the JSON list. Example: `[ {{"date": "{now_date_iso}", "summary": "Observe cauliflory"}}, {{"date": "{weekend_start_date_iso}", "summary": "Walk in Botanical Garden"}}, {{"date": "{current_year}-07-07", "summary": "Belgrade-Subotica railway opening"}} ]`
-    * If no items were found, output an empty JSON list: `[]`.
-    * **Output ONLY the JSON list or `[]`, nothing else.**"""  # noqa: E501
+1.  **Criteria for a Participatory Event:** An item qualifies as a participatory event ONLY IF it meets these criteria:
+    *   It is an activity open to the public (e.g., concert, exhibition, workshop, meetup, film screening, lecture, talk, performance, community action).
+    *   It implies attendance. Look for indicators like a specific venue/location (e.g., "в Полете", "at the gallery"), registration details, ticket prices, or a clear call to join an activity with a host/performer at a certain place and time.
+
+2.  **Identify Potential Items:** Find mentions of:
+    *   Specific, scheduled **future events** with explicit dates that meet the criteria in step 1.
+    *   Events mentioned with a day of the week (e.g., "this Wednesday").
+    *   **Actionable** current activities or **participatory suggestions** (e.g., "go for a walk", "visit an exhibition") linked to "now", "сейчас", "today".
+    *   **Actionable** activities or **participatory suggestions** linked to "weekend", "выходные".
+
+3.  **Strictly Exclude:**
+    *   **News & Announcements:** Exclude news reports and announcements about future political or economic actions (e.g., 'measures will be presented', 'an address will be made'). These are not participatory.
+    *   **Informational Bulletins:** Exclude service disruptions or closures (e.g., 'a strike will begin on...', 'a road will be closed').
+    *   **General Calls to Action:** Exclude non-event requests (donations, subscriptions).
+    *   **Past Events:** Ignore events with dates clearly before {now_date_iso}.
+    *   **Classifieds:** Exclude personal ads (e.g., 'cat looking for a home').
+    *   **Summaries/Headlines:** Do not extract the summary of a news digest itself. Instead, look for qualifying events *within* the digest's list items.
+
+4.  **For Each Found Item (that was NOT excluded):**
+    *   **a. Determine Date Source & Assign Date (in order of priority):**
+        *   1. **Explicit Day-Month:** If found, use that Day-Month.
+        *   2. **Day of the Week:** If a day of the week is mentioned (e.g., "в среду", "on Friday"), **use the corresponding full date from the "Dates for This Week" reference list above.** For example, for "в эту среду", use the date provided for `{wednesday_iso}`.
+        *   3. **"Now" Keywords:** If "now"/"сейчас"/"today" keywords are used, use the **Now Date** (`{now_date_iso}`).
+        *   4. **"Weekend" Keywords:** If "weekend"/"выходные" keywords are used, use the **Weekend Start Date** (`{weekend_start_date_iso}`).
+        *   *If none of the above time references are found, skip the item.*
+    *   **b. Infer Year (only if using an explicit Day-Month from 4.a.1):**
+        *   If an explicit year is mentioned for the item, use it.
+        *   Otherwise, compare the item's Month-Day to **{current_month_day_formatted}**:
+            *   If on or after **{current_month_day_formatted}**, use the current year: **{current_year}**.
+            *   If before **{current_month_day_formatted}**, use the next year: **{next_year}**.
+    *   **c. Format Final Date:** Combine the inferred parts into **YYYY-MM-DD** format. (Dates from steps 4.a.2, 4.a.3, and 4.a.4 are already fully formatted).
+    *   **d. Create Summary:** Write a brief summary of the event (e.g., "«Серьёзный разговор» с Костей Широковым в Полете", "Film screening 'Les Enfants Terribles'").
+    *   **e. Create JSON Object:** Structure as `{{"date": "YYYY-MM-DD", "summary": "Your summary"}}`.
+
+5.  **Compile and Output:**
+    *   Collect all valid JSON objects into a single list.
+    *   **Output ONLY the JSON list or `[]`. Do not add any other text or explanations.**"""  # noqa: E501
 
 
 def make_prompt(date: dt.datetime) -> str:
     base_dt = date.date()
 
     days_until_saturday = (5 - base_dt.weekday() + 7) % 7
-    if days_until_saturday == 0:
-        days_until_saturday = 7
-    weekend_start = base_dt + dt.timedelta(days=days_until_saturday)
+    weekend_start = base_dt + dt.timedelta(
+        days=days_until_saturday if days_until_saturday > 0 else 7
+    )
+
+    today_weekday = base_dt.weekday()  # Monday is 0, Sunday is 6
+    week_dates = {}
+    day_names = [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    ]
+    for i in range(7):
+        days_to_add = (i - today_weekday + 7) % 7
+        target_date = base_dt + dt.timedelta(days=days_to_add)
+        week_dates[f"{day_names[i]}_iso"] = target_date.isoformat()
 
     return PROMPT_TEMPLATE.format(
         current_year=base_dt.year,
@@ -179,6 +212,7 @@ def make_prompt(date: dt.datetime) -> str:
         current_month_day_formatted=base_dt.strftime("%b %d"),
         now_date_iso=base_dt.isoformat(),
         weekend_start_date_iso=weekend_start.isoformat(),
+        **week_dates,  # Unpack the dictionary with all the week dates
     )
 
 
