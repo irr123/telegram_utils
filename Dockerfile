@@ -1,8 +1,14 @@
-ARG BASE_IMAGE=python:3.13.3-slim-bookworm
-ARG UV_VERSION=0.6.14-python3.13-bookworm-slim
+ARG BASE_IMAGE=python:3.14.0-slim-trixie
+ARG UV_VERSION=0.9.7-python3.14-trixie-slim
 
 FROM ghcr.io/astral-sh/uv:$UV_VERSION AS uv_carrier
 FROM $BASE_IMAGE AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cargo \
+    rustc \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=uv_carrier /usr/local/bin/uv /usr/local/bin/
 RUN uv venv /opt/venv
@@ -16,9 +22,9 @@ FROM $BASE_IMAGE
 ENV PYTHONUNBUFFERED=1 \
     PATH=/opt/venv/bin:$PATH
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends make && \
-    rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    make \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /opt/venv /opt/venv
 
