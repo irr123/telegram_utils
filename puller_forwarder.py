@@ -3,46 +3,47 @@ import datetime as dt
 import json
 import os
 
-import google
-from google.generativeai.types.generation_types import GenerateContentResponse
+import google.api_core.exceptions
+import google.generativeai as genai
+from google.generativeai.types import generation_types
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from telethon import TelegramClient, events, tl
+from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from telethon.tl.custom import Message
 
 
 class Gemini:
     def __init__(self, api_key: str):
-        assert api_key
-        google.generativeai.configure(api_key=api_key)
+        genai.configure(api_key=api_key)
 
     async def complete(
         self,
         user_prompt: str,
         sys_prompt: str | None = None,
         model: str = "gemini-2.5-flash-lite",
-    ) -> tuple[GenerateContentResponse, str]:
-        m = google.generativeai.GenerativeModel(model, system_instruction=sys_prompt)
+    ) -> tuple[generation_types.GenerateContentResponse, str]:
+        m = genai.GenerativeModel(model_name=model, system_instruction=sys_prompt)
 
         try:
             resp = await m.generate_content_async(
                 user_prompt,
                 safety_settings="block_none",
-                generation_config=google.generativeai.GenerationConfig(
+                generation_config=genai.GenerationConfig(
                     candidate_count=1,
                     temperature=0.0,
                 ),
             )
         except google.api_core.exceptions.NotFound as exc:
             try:
-                models = google.generativeai.list_models()
+                models = list(genai.list_models())
             except Exception:
                 pass
             else:
-                print(f"Available list of models: {[m.name for m in models]}")
+                print(f"Available models: {[m.name for m in models]}")
             raise exc
 
-        return resp, resp.text.strip()
+        return resp, resp.text.strip()  # type: ignore
 
 
 class Calendar:
@@ -50,37 +51,189 @@ class Calendar:
     S_ACCOUNT_FILE = "./credentials.json"
 
     def __init__(self, cal_id: str):
-        assert cal_id
-        self._cal_id = cal_id
-
-        creds_builder = Credentials.from_service_account_file
-        creds = creds_builder(self.S_ACCOUNT_FILE, scopes=self.SCOPES)
+        creds = Credentials.from_service_account_file(
+            self.S_ACCOUNT_FILE,
+            scopes=self.SCOPES,
+        )
         self._client = build("calendar", "v3", credentials=creds)
+        self._cal_id = cal_id
 
     async def publish(self, ev_date: dt.datetime, summary: str, link: str):
         ev = {
             "summary": summary,
             "description": f"Source: {link}",
-            "start": {
-                "date": ev_date.date().isoformat(),
-                "timeZone": "UTC",
-            },
+            "start": {"date": ev_date.date().isoformat(), "timeZone": "UTC"},
             "end": {
                 "date": (ev_date.date() + dt.timedelta(days=1)).isoformat(),
                 "timeZone": "UTC",
             },
         }
-
         req = self._client.events().insert(calendarId=self._cal_id, body=ev)
         return await asyncio.to_thread(req.execute)
 
 
+PROMPT_TEMPLATE = """**Role:** AI assistant for extracting *public, participatory events* from text.
+
+**Task:** Extract ONLY events where a person can physically or virtually attend. Output JSON list `[{"date": "YYYY-MM-DD", "summary": "Brief event description"}]`. Empty list `[]` if none.
+
+**CRITICAL FILTERS — APPLY STRICTLY:**
+
+1. **MUST HAVE:**
+   - Open to public (concert, meetup, workshop, screening, lecture, game, walk, market, tour, performance).
+   - **Clear attendance signal:** venue, time, registration, free/paid entry, "come", "join", "visit", "at [place]", "starts at [time]".
+
+2. **MUST EXCLUDE:**
+   - **Services/consultations** (career advice, resume help, coaching, even if recurring).
+   - **General announcements** (flights start, building demolished, strike begins, museum free days *without specific event*).
+   - **Calls to action without event** (donate, subscribe, support project).
+   - **News summaries/headlines** — extract only *embedded events*.
+   - **Past events** (before {now_date_iso}).
+   - **Non-participatory** (store closing, landlord dispute, even with "visit today" — unless it's a public farewell event).
+
+**DATE RESOLUTION (priority order):**
+
+1. **Explicit full date** → use it.
+2. **Day of week** ("this Wednesday", "в субботу") → use corresponding `{day_iso}` from list.
+3. **"today"/"now"/"сейчас"** → `{now_date_iso}`
+4. **"weekend"/"выходные"** → `{weekend_start_date_iso}`
+5. **No time reference** → **SKIP**
+
+**YEAR INFERENCE (only for Day-Month):**
+- Use explicit year if given.
+- Else: if Month-Day ≥ `{current_month_day_formatted}` → `{current_year}`
+- Else → `{next_year}`
+
+**REFERENCE DATES:**
+* Now: {now_date_iso}
+* Weekend start: {weekend_start_date_iso}
+* This week:
+  - Mon: {monday_iso}
+  - Tue: {tuesday_iso}
+  - Wed: {wednesday_iso}
+  - Thu: {thursday_iso}
+  - Fri: {friday_iso}
+  - Sat: {saturday_iso}
+  - Sun: {sunday_iso}
+
+**OUTPUT ONLY VALID JSON LIST. NO TEXT.**"""  # noqa: E501
+
+
+def make_prompt(date: dt.datetime) -> str:
+    base_dt = date.date()
+    days_until_saturday = (5 - base_dt.weekday() + 7) % 7
+    weekend_start = base_dt + dt.timedelta(days=days_until_saturday or 7)
+
+    today_weekday = base_dt.weekday()
+    day_names = [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    ]
+    week_dates = {
+        f"{day_names[i]}_iso": (
+            base_dt + dt.timedelta(days=(i - today_weekday + 7) % 7)
+        ).isoformat()
+        for i in range(7)
+    }
+
+    return PROMPT_TEMPLATE.format(
+        current_year=base_dt.year,
+        next_year=base_dt.year + 1,
+        current_month_day_formatted=base_dt.strftime("%b %d"),
+        now_date_iso=base_dt.isoformat(),
+        weekend_start_date_iso=weekend_start.isoformat(),
+        **week_dates,
+    )
+
+
+async def setup(
+    tg: TelegramClient,
+    gemini: Gemini,
+    calendar: Calendar,
+    dst: str,
+    src: tuple[str, ...],
+):
+    dest_entity = await tg.get_entity(dst)
+    dest_username = getattr(dest_entity, "username", "")
+
+    for source in src:
+        source_entity = await tg.get_entity(source)
+
+        @tg.on(events.NewMessage(chats=source_entity))
+        async def handler(event: events.NewMessage.Event):
+            message: Message = event.message
+            if not message.message:
+                return
+
+            sender = await message.get_sender()
+            sender_name = getattr(sender, "username", None)
+            sender_name = sender_name or getattr(sender, "title", "Unknown")
+
+            print(f"{sender_name} 1: {message.message}")
+            prompt = make_prompt(message.date or dt.datetime.now())
+            _, completion = await gemini.complete(message.message, prompt)
+            completion = completion.removeprefix("```json").removesuffix("```").strip()
+            print(f"{sender_name} 2: {completion}")
+
+            try:
+                events_list: list[dict[str, str]] = json.loads(completion)
+            except Exception as e:
+                print(f"{sender_name}: {e}")
+                return
+
+            if not events_list:
+                return
+
+            try:
+                forwarded = await message.forward_to(dest_entity)
+            except Exception as e:
+                print(f"{sender_name}: {e}")
+                return
+
+            for event_dict in events_list:
+                try:
+                    ev_date = dt.datetime.strptime(event_dict["date"], "%Y-%m-%d")
+                except Exception as e:
+                    print(f"{sender_name}: {e}")
+                    continue
+
+                summary = event_dict.get(
+                    "summary", f"{sender_name}: {message.message[:32]}"
+                )
+                link = f"https://t.me/{dest_username}/{forwarded.id}"
+
+                try:
+                    ev = await calendar.publish(ev_date, summary, link)
+                except Exception as e:
+                    print(f"{sender_name}: {e}")
+                    continue
+
+                print(f"{sender_name} 3: {ev}")
+
+
 async def main():
-    calendar = Calendar(os.getenv("CALENDAR_ID"))
-    gemini = Gemini(os.getenv("GEMINI_API_KEY"))
-    session = StringSession(os.getenv("SESSION"))
-    api_id = os.getenv("TG_API_ID")
+    cal_id = os.getenv("CALENDAR_ID")
+    assert cal_id
+    calendar = Calendar(cal_id)
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    assert api_key
+    gemini = Gemini(api_key)
+
+    session_str = os.getenv("SESSION")
+    assert session_str
+    session = StringSession(session_str)
+
+    api_id_str = os.getenv("TG_API_ID")
+    assert api_id_str
+    api_id = int(api_id_str)
+
     api_hash = os.getenv("TG_API_HASH")
+    assert api_hash
 
     async with TelegramClient(session, api_id, api_hash) as tg:
         await setup(
@@ -119,161 +272,7 @@ async def main():
         )
 
         print("Started!")
-
         await tg.run_until_disconnected()
-
-
-PROMPT_TEMPLATE = """**Role:** AI assistant for extracting *public, participatory events* from text.
-
-**Task:** Identify publicly accessible, participatory events mentioned in the text. These are activities where a person can physically or virtually attend. Extract or assign a date (YYYY-MM-DD) and create a brief summary for each event. Output ONLY a JSON list: `[{{"date": "YYYY-MM-DD", "summary": "Item Summary"}}, ...]` or an empty list `[]` if no events are found.
-
-**Reference Dates:**
-* Now Date (use for "now", "сейчас", "today"): {now_date_iso}
-* Weekend Start Date (use for "weekend", "выходные"): {weekend_start_date_iso}
-* Reference Date for Year Inference: {current_date_formatted}
-* **Dates for This Week (use for "в понедельник", "on Tuesday", "в эту среду", etc.):**
-  * This Monday: {monday_iso}
-  * This Tuesday: {tuesday_iso}
-  * This Wednesday: {wednesday_iso}
-  * This Thursday: {thursday_iso}
-  * This Friday: {friday_iso}
-  * This Saturday: {saturday_iso}
-  * This Sunday: {sunday_iso}
-
-**Instructions:**
-
-1.  **Criteria for a Participatory Event:** An item qualifies as a participatory event ONLY IF it meets these criteria:
-    *   It is an activity open to the public (e.g., concert, exhibition, workshop, meetup, film screening, lecture, talk, performance, community action).
-    *   It implies attendance. Look for indicators like a specific venue/location (e.g., "в Полете", "at the gallery"), registration details, ticket prices, or a clear call to join an activity with a host/performer at a certain place and time.
-
-2.  **Identify Potential Items:** Find mentions of:
-    *   Specific, scheduled **future events** with explicit dates that meet the criteria in step 1.
-    *   Events mentioned with a day of the week (e.g., "this Wednesday").
-    *   **Actionable** current activities or **participatory suggestions** (e.g., "go for a walk", "visit an exhibition") linked to "now", "сейчас", "today".
-    *   **Actionable** activities or **participatory suggestions** linked to "weekend", "выходные".
-
-3.  **Strictly Exclude:**
-    *   **News & Announcements:** Exclude news reports and announcements about future political or economic actions (e.g., 'measures will be presented', 'an address will be made'). These are not participatory.
-    *   **Informational Bulletins:** Exclude service disruptions or closures (e.g., 'a strike will begin on...', 'a road will be closed').
-    *   **General Calls to Action:** Exclude non-event requests (donations, subscriptions).
-    *   **Past Events:** Ignore events with dates clearly before {now_date_iso}.
-    *   **Classifieds:** Exclude personal ads (e.g., 'cat looking for a home').
-    *   **Summaries/Headlines:** Do not extract the summary of a news digest itself. Instead, look for qualifying events *within* the digest's list items.
-
-4.  **For Each Found Item (that was NOT excluded):**
-    *   **a. Determine Date Source & Assign Date (in order of priority):**
-        *   1. **Explicit Day-Month:** If found, use that Day-Month.
-        *   2. **Day of the Week:** If a day of the week is mentioned (e.g., "в среду", "on Friday"), **use the corresponding full date from the "Dates for This Week" reference list above.** For example, for "в эту среду", use the date provided for `{wednesday_iso}`.
-        *   3. **"Now" Keywords:** If "now"/"сейчас"/"today" keywords are used, use the **Now Date** (`{now_date_iso}`).
-        *   4. **"Weekend" Keywords:** If "weekend"/"выходные" keywords are used, use the **Weekend Start Date** (`{weekend_start_date_iso}`).
-        *   *If none of the above time references are found, skip the item.*
-    *   **b. Infer Year (only if using an explicit Day-Month from 4.a.1):**
-        *   If an explicit year is mentioned for the item, use it.
-        *   Otherwise, compare the item's Month-Day to **{current_month_day_formatted}**:
-            *   If on or after **{current_month_day_formatted}**, use the current year: **{current_year}**.
-            *   If before **{current_month_day_formatted}**, use the next year: **{next_year}**.
-    *   **c. Format Final Date:** Combine the inferred parts into **YYYY-MM-DD** format. (Dates from steps 4.a.2, 4.a.3, and 4.a.4 are already fully formatted).
-    *   **d. Create Summary:** Write a brief summary of the event (e.g., "«Серьёзный разговор» с Костей Широковым в Полете", "Film screening 'Les Enfants Terribles'").
-    *   **e. Create JSON Object:** Structure as `{{"date": "YYYY-MM-DD", "summary": "Your summary"}}`.
-
-5.  **Compile and Output:**
-    *   Collect all valid JSON objects into a single list.
-    *   **Output ONLY the JSON list or `[]`. Do not add any other text or explanations.**"""  # noqa: E501
-
-
-def make_prompt(date: dt.datetime) -> str:
-    base_dt = date.date()
-
-    days_until_saturday = (5 - base_dt.weekday() + 7) % 7
-    weekend_start = base_dt + dt.timedelta(
-        days=days_until_saturday if days_until_saturday > 0 else 7
-    )
-
-    today_weekday = base_dt.weekday()  # Monday is 0, Sunday is 6
-    week_dates = {}
-    day_names = [
-        "monday",
-        "tuesday",
-        "wednesday",
-        "thursday",
-        "friday",
-        "saturday",
-        "sunday",
-    ]
-    for i in range(7):
-        days_to_add = (i - today_weekday + 7) % 7
-        target_date = base_dt + dt.timedelta(days=days_to_add)
-        week_dates[f"{day_names[i]}_iso"] = target_date.isoformat()
-
-    return PROMPT_TEMPLATE.format(
-        current_year=base_dt.year,
-        next_year=base_dt.year + 1,
-        current_date_formatted=base_dt.strftime("%B %d, %Y"),
-        current_month_day_formatted=base_dt.strftime("%b %d"),
-        now_date_iso=base_dt.isoformat(),
-        weekend_start_date_iso=weekend_start.isoformat(),
-        **week_dates,  # Unpack the dictionary with all the week dates
-    )
-
-
-async def setup(
-    tg: TelegramClient,
-    gemini: Gemini,
-    calendar: Calendar,
-    dst: str,
-    src: tuple[str],
-):
-    dest_entity = await tg.get_entity(dst)
-
-    for source in src:
-        source_entity = await tg.get_entity(source)
-
-        @tg.on(events.NewMessage(chats=source_entity))
-        async def handler(event: events.NewMessage.Event):
-            message: tl.custom.message.Message = event.message
-            if not message or not message.message:
-                return
-
-            sender = await message.get_sender()
-            sender_name = getattr(sender, "username", "Unknown")
-
-            print(f"{sender_name} 1: {message.message}")
-            prompt = make_prompt(message.date or dt.datetime.now())
-            _, completion = await gemini.complete(message.message, prompt)
-            completion = completion.removeprefix("```json").removesuffix("```")
-            print(f"{sender_name} 2: {completion}")
-            try:
-                events = json.loads(completion)
-            except Exception as e:
-                print(f"{sender_name}: {e}")
-                return
-
-            if not events:
-                return
-
-            try:
-                forwarded = await message.forward_to(dest_entity)
-            except Exception as e:
-                print(f"{sender_name}: {e}")
-                return
-
-            for event in events:
-                try:
-                    ev_date = dt.datetime.strptime(event["date"], "%Y-%m-%d")
-                except Exception as e:
-                    print(f"{sender_name}: {e}")
-                    continue
-
-                summary = event.get("summary", f"{sender_name}: {message.message[:32]}")
-                link = f"https://t.me/{dest_entity.username}/{forwarded.id}"
-
-                try:
-                    ev = await calendar.publish(ev_date, summary, link)
-                except Exception as e:
-                    print(f"{sender_name}: {e}")
-                    continue
-
-                print(f"{sender_name} 3: {ev}")
 
 
 if __name__ == "__main__":
