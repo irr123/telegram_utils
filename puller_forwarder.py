@@ -74,7 +74,7 @@ class Calendar:
 
 PROMPT_TEMPLATE = """**Role:** AI assistant for extracting *public, participatory events* from text.
 
-**Task:** Extract ONLY events where a person can physically or virtually attend. Output JSON list `[{"date": "YYYY-MM-DD", "summary": "Brief event description"}]`. Empty list `[]` if none.
+**Task:** Extract ONLY events where a person can physically or virtually attend. Output JSON list `[{{\"date\": \"YYYY-MM-DD\", \"summary\": \"Brief event description\"}}]`. Empty list `[]` if none.
 
 **CRITICAL FILTERS — APPLY STRICTLY:**
 
@@ -93,7 +93,7 @@ PROMPT_TEMPLATE = """**Role:** AI assistant for extracting *public, participator
 **DATE RESOLUTION (priority order):**
 
 1. **Explicit full date** → use it.
-2. **Day of week** ("this Wednesday", "в субботу") → use corresponding `{day_iso}` from list.
+2. **Day of week** ("this Wednesday", "в субботу") → use `{wednesday_iso}`, `{saturday_iso}`, etc. from list below.
 3. **"today"/"now"/"сейчас"** → `{now_date_iso}`
 4. **"weekend"/"выходные"** → `{weekend_start_date_iso}`
 5. **No time reference** → **SKIP**

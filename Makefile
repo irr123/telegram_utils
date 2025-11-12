@@ -43,7 +43,9 @@ docker_stop:
 
 .PHONY: release
 release: fmt lint
-	tar --exclude='./.git' \
-		-czvf /tmp/app.tar.gz .
-	rsync -avz --progress /tmp/app.tar.gz cryptopeer.trade:/root
+	docker build . -t c1rno/private:tg5
+	docker push c1rno/private:tg5
+	# tar --exclude='./.git' \
+	# 	-czvf /tmp/app.tar.gz .
+	# rsync -avz --progress /tmp/app.tar.gz cryptopeer.trade:/root
 	# and on host: rm -rf /root/telegram_utils/* && tar -xzvf /root/app.tar.gz -C /root/telegram_utils
