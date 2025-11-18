@@ -1,0 +1,38 @@
+volumes:
+  ollama_data:
+
+services:
+  ollama:
+    image: ollama/ollama:0.12.11
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        limits:
+          memory: 1100M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    # plus:
+    # docker compose exec ollama ollama pull qwen2.5:0.5b-instruct-q4_K_M
+
+  app:
+    image: c1rno/private:tg6
+    container_name: tg_puller
+    restart: always
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    volumes:
+      - ./.env:/opt/app/.env:ro
+      - ./credentials.json:/opt/app/credentials.json:ro
+    command: ["make", "run"]

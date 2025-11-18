@@ -24,7 +24,11 @@ ENV PYTHONUNBUFFERED=1 \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     make \
-    && rm -rf /var/lib/apt/lists/*
+    torsocks \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo 'TorAddress 172.17.0.1' > /etc/tor/torsocks.conf \
+    && echo 'TorPort 9050' >> /etc/tor/torsocks.conf\
+    && echo 'AllowOutboundLocalhost 1' >> /etc/tor/torsocks.conf
 
 COPY --from=builder /opt/venv /opt/venv
 

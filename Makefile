@@ -1,4 +1,5 @@
 include $(PWD)/.env
+export
 
 .PHONY: fmt
 fmt:
@@ -10,42 +11,42 @@ lint:
 
 .PHONY: run
 run:
-	@TG_API_ID=$(TG_API_ID)\
-		TG_API_HASH=$(TG_API_HASH)\
-		SESSION=$(SESSION)\
-		GEMINI_API_KEY=$(GEMINI_API_KEY)\
-		CALENDAR_ID=$(CALENDAR_ID)\
-		python ./puller_forwarder.py
+	@if command -v torsocks >/dev/null 2>&1; then \
+		echo "Using torsocks..."; \
+		torsocks python ./puller_forwarder.py; \
+	else \
+		echo "torsocks not found, running directly..."; \
+		python ./puller_forwarder.py; \
+	fi
 
 .PHONY: session
 session:
-	@TG_API_ID=$(TG_API_ID)\
-		TG_API_HASH=$(TG_API_HASH)\
-		node ./puller_forwarder/store_tg_session.mjs
-
+	node ./puller_forwarder/store_tg_session.mjs
 
 IMAGE = tg_puller_forwarder
 
 .PHONY: docker_run
 docker_run:
-	docker build . -t $(IMAGE)
 	docker run -d\
 		--name $(IMAGE)\
 		--restart always\
 		-v $(PWD)/.env:/opt/app/.env\
 		-v $(PWD)/credentials.json:/opt/app/credentials.json\
-		$(IMAGE) sh -c "cd /opt/app && make run"
+		c1rno/private:tg6 sh -c "\
+			echo 'TorAddress 172.17.0.1' > /etc/tor/torsocks.conf &&\
+			echo 'TorPort 9050' >> /etc/tor/torsocks.conf &&\
+			echo 'AllowOutboundLocalhost 1' >> /etc/tor/torsocks.conf &&\
+			make run"
 
 .PHONY: docker_stop
 docker_stop:
-	docker stop $(IMAGE) || true
-	docker rm $(IMAGE)
+	docker rm -f $(IMAGE) || true
 
 .PHONY: release
 release: fmt lint
-	docker build . -t c1rno/private:tg5
-	docker push c1rno/private:tg5
+	docker build . -f Dockerfile -t c1rno/private:tg6
+	docker push c1rno/private:tg6
 	# tar --exclude='./.git' \
 	# 	-czvf /tmp/app.tar.gz .
-	# rsync -avz --progress /tmp/app.tar.gz cryptopeer.trade:/root
+	# rsync -avz --progress /tmp/app.tar.gz 95.142.47.115:/root
 	# and on host: rm -rf /root/telegram_utils/* && tar -xzvf /root/app.tar.gz -C /root/telegram_utils

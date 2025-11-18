@@ -3,9 +3,7 @@ import datetime as dt
 import json
 import os
 
-import google.api_core.exceptions
-import google.generativeai as genai
-from google.generativeai.types import generation_types
+import httpx
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from telethon import TelegramClient, events
@@ -13,37 +11,43 @@ from telethon.sessions import StringSession
 from telethon.tl.custom import Message
 
 
-class Gemini:
-    def __init__(self, api_key: str):
-        genai.configure(api_key=api_key)
+class Ollama:
+    def __init__(self, base_url):
+        self.base_url = base_url
 
     async def complete(
         self,
         user_prompt: str,
         sys_prompt: str | None = None,
-        model: str = "gemini-2.5-flash-lite",
-    ) -> tuple[generation_types.GenerateContentResponse, str]:
-        m = genai.GenerativeModel(model_name=model, system_instruction=sys_prompt)
+        model: str = "qwen2.5:0.5b-instruct-q4_K_M",
+    ) -> tuple[tuple[dict, dict], str]:
+        messages = (
+            {"role": "user", "content": user_prompt},
+            {"role": "system", "content": sys_prompt},
+        )
+        if sys_prompt is None:
+            messages = messages[1:]
+        payload = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": 0.0,
+                "top_p": 0.9,
+            },
+        }
 
-        try:
-            resp = await m.generate_content_async(
-                user_prompt,
-                safety_settings="block_none",
-                generation_config=genai.GenerationConfig(
-                    candidate_count=1,
-                    temperature=0.0,
-                ),
-            )
-        except google.api_core.exceptions.NotFound as exc:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(f"{self.base_url}/api/chat", json=payload)
             try:
-                models = list(genai.list_models())
-            except Exception:
-                pass
-            else:
-                print(f"Available models: {[m.name for m in models]}")
-            raise exc
+                resp.raise_for_status()
+            except Exception as e:
+                raise Exception(resp.text) from e
 
-        return resp, resp.text.strip()  # type: ignore
+            result = resp.json()
+
+        text = result.get("message", {}).get("content", "[]")
+        return (payload, result), text.strip().removeprefix("```json").removesuffix("```")
 
 
 class Calendar:
@@ -51,12 +55,12 @@ class Calendar:
     S_ACCOUNT_FILE = "./credentials.json"
 
     def __init__(self, cal_id: str):
+        self._cal_id = cal_id
         creds = Credentials.from_service_account_file(
             self.S_ACCOUNT_FILE,
             scopes=self.SCOPES,
         )
         self._client = build("calendar", "v3", credentials=creds)
-        self._cal_id = cal_id
 
     async def publish(self, ev_date: dt.datetime, summary: str, link: str):
         ev = {
@@ -72,59 +76,34 @@ class Calendar:
         return await asyncio.to_thread(req.execute)
 
 
-PROMPT_TEMPLATE = """**Role:** AI assistant for extracting *public, participatory events* from text.
+PROMPT_TEMPLATE = """Extract ONLY public participatory events from the text. Output as JSON list: [{{"date": "YYYY-MM-DD", "summary": "Brief title"}}]. Return [] if none.
 
-**Task:** Extract ONLY events where a person can physically or virtually attend. Output JSON list `[{{\"date\": \"YYYY-MM-DD\", \"summary\": \"Brief event description\"}}]`. Empty list `[]` if none.
+CRITICAL RULES:
+- MUST include: public access + clear attendance signal (e.g., "at [place]", "join", "starts at", "free entry", "visit").
+- MUST exclude: services (coaching, advice), news, ads, donations, store closures, past events (< {now_date_iso}).
+- Date resolution priority:
+  1. Explicit date (e.g., "Dec 5")
+  2. Relative day (e.g., "this Wednesday" → {wednesday_iso})
+  3. "today" → {now_date_iso}
+  4. "weekend" → {weekend_start_date_iso}
+  5. No date? → SKIP
+- Year inference: if month-day ≥ {current_month_day_formatted} → {current_year}, else {next_year}
 
-**CRITICAL FILTERS — APPLY STRICTLY:**
-
-1. **MUST HAVE:**
-   - Open to public (concert, meetup, workshop, screening, lecture, game, walk, market, tour, performance).
-   - **Clear attendance signal:** venue, time, registration, free/paid entry, "come", "join", "visit", "at [place]", "starts at [time]".
-
-2. **MUST EXCLUDE:**
-   - **Services/consultations** (career advice, resume help, coaching, even if recurring).
-   - **General announcements** (flights start, building demolished, strike begins, museum free days *without specific event*).
-   - **Calls to action without event** (donate, subscribe, support project).
-   - **News summaries/headlines** — extract only *embedded events*.
-   - **Past events** (before {now_date_iso}).
-   - **Non-participatory** (store closing, landlord dispute, even with "visit today" — unless it's a public farewell event).
-
-**DATE RESOLUTION (priority order):**
-
-1. **Explicit full date** → use it.
-2. **Day of week** ("this Wednesday", "в субботу") → use `{wednesday_iso}`, `{saturday_iso}`, etc. from list below.
-3. **"today"/"now"/"сейчас"** → `{now_date_iso}`
-4. **"weekend"/"выходные"** → `{weekend_start_date_iso}`
-5. **No time reference** → **SKIP**
-
-**YEAR INFERENCE (only for Day-Month):**
-- Use explicit year if given.
-- Else: if Month-Day ≥ `{current_month_day_formatted}` → `{current_year}`
-- Else → `{next_year}`
-
-**REFERENCE DATES:**
-* Now: {now_date_iso}
-* Weekend start: {weekend_start_date_iso}
-* This week:
-  - Mon: {monday_iso}
-  - Tue: {tuesday_iso}
-  - Wed: {wednesday_iso}
-  - Thu: {thursday_iso}
-  - Fri: {friday_iso}
-  - Sat: {saturday_iso}
-  - Sun: {sunday_iso}
-
-**OUTPUT ONLY VALID JSON LIST. NO TEXT.**"""  # noqa: E501
+OUTPUT ONLY VALID JSON. NO TEXT. NO EXPLANATIONS."""  # noqa: E501
 
 
-def make_prompt(date: dt.datetime) -> str:
-    base_dt = date.date()
+def make_prompt(message_date: dt.datetime) -> str:
+    base_dt = message_date.date()
+    now_date_iso = base_dt.isoformat()
+    current_month_day_formatted = base_dt.strftime("%b %d")
+    current_year = base_dt.year
+    next_year = base_dt.year + 1
+
     days_until_saturday = (5 - base_dt.weekday() + 7) % 7
     weekend_start = base_dt + dt.timedelta(days=days_until_saturday or 7)
+    weekend_start_date_iso = weekend_start.isoformat()
 
-    today_weekday = base_dt.weekday()
-    day_names = [
+    day_names = (
         "monday",
         "tuesday",
         "wednesday",
@@ -132,27 +111,27 @@ def make_prompt(date: dt.datetime) -> str:
         "friday",
         "saturday",
         "sunday",
-    ]
+    )
     week_dates = {
         f"{day_names[i]}_iso": (
-            base_dt + dt.timedelta(days=(i - today_weekday + 7) % 7)
+            base_dt + dt.timedelta(days=(i - base_dt.weekday() + 7) % 7)
         ).isoformat()
         for i in range(7)
     }
 
     return PROMPT_TEMPLATE.format(
-        current_year=base_dt.year,
-        next_year=base_dt.year + 1,
-        current_month_day_formatted=base_dt.strftime("%b %d"),
-        now_date_iso=base_dt.isoformat(),
-        weekend_start_date_iso=weekend_start.isoformat(),
+        now_date_iso=now_date_iso,
+        current_month_day_formatted=current_month_day_formatted,
+        current_year=current_year,
+        next_year=next_year,
+        weekend_start_date_iso=weekend_start_date_iso,
         **week_dates,
     )
 
 
 async def setup(
     tg: TelegramClient,
-    gemini: Gemini,
+    llm: Ollama,
     calendar: Calendar,
     dst: str,
     src: tuple[str, ...],
@@ -175,9 +154,8 @@ async def setup(
 
             print(f"{sender_name} 1: {message.message}")
             prompt = make_prompt(message.date or dt.datetime.now())
-            _, completion = await gemini.complete(message.message, prompt)
-            completion = completion.removeprefix("```json").removesuffix("```").strip()
-            print(f"{sender_name} 2: {completion}")
+            resp, completion = await llm.complete(message.message, prompt)
+            print(f"{sender_name} 2: {resp}")
 
             try:
                 events_list: list[dict[str, str]] = json.loads(completion)
@@ -220,9 +198,9 @@ async def main():
     assert cal_id
     calendar = Calendar(cal_id)
 
-    api_key = os.getenv("GEMINI_API_KEY")
-    assert api_key
-    gemini = Gemini(api_key)
+    base_url = os.getenv("OLLAMA_HOST")
+    assert base_url
+    llm = Ollama(base_url)
 
     session_str = os.getenv("SESSION")
     assert session_str
@@ -238,7 +216,7 @@ async def main():
     async with TelegramClient(session, api_id, api_hash) as tg:
         await setup(
             tg,
-            gemini,
+            llm,
             calendar,
             "https://t.me/belgrade_aggregated",
             (
