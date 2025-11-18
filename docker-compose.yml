@@ -10,29 +10,24 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_NOHISTORY=1
+      - OLLAMA_NUM_PARALLEL=1
     deploy:
       resources:
         limits:
-          memory: 1100M
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 30s
+          memory: 1000M
     # plus:
-    # docker compose exec ollama ollama pull qwen2.5:0.5b-instruct-q4_K_M
+    # docker compose exec ollama ollama pull qwen3:0.6b-q4_K_M
 
   app:
     image: c1rno/private:tg6
     container_name: tg_puller
     restart: always
-    depends_on:
-      ollama:
-        condition: service_healthy
     environment:
       - OLLAMA_HOST=http://ollama:11434
     volumes:
       - ./.env:/opt/app/.env:ro
       - ./credentials.json:/opt/app/credentials.json:ro
-    command: ["make", "run"]
+    command: sh -c "cd /opt/app && make run"

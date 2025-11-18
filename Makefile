@@ -1,4 +1,4 @@
-include $(PWD)/.env
+-include $(PWD)/.env
 export
 
 .PHONY: fmt
@@ -23,29 +23,10 @@ run:
 session:
 	node ./puller_forwarder/store_tg_session.mjs
 
-IMAGE = tg_puller_forwarder
-
-.PHONY: docker_run
-docker_run:
-	docker run -d\
-		--name $(IMAGE)\
-		--restart always\
-		-v $(PWD)/.env:/opt/app/.env\
-		-v $(PWD)/credentials.json:/opt/app/credentials.json\
-		c1rno/private:tg6 sh -c "\
-			echo 'TorAddress 172.17.0.1' > /etc/tor/torsocks.conf &&\
-			echo 'TorPort 9050' >> /etc/tor/torsocks.conf &&\
-			echo 'AllowOutboundLocalhost 1' >> /etc/tor/torsocks.conf &&\
-			make run"
-
-.PHONY: docker_stop
-docker_stop:
-	docker rm -f $(IMAGE) || true
-
 .PHONY: release
 release: fmt lint
-	docker build . -f Dockerfile -t c1rno/private:tg6
-	docker push c1rno/private:tg6
+	docker build . -f Dockerfile -t c1rno/private:tg8
+	docker push c1rno/private:tg8
 	# tar --exclude='./.git' \
 	# 	-czvf /tmp/app.tar.gz .
 	# rsync -avz --progress /tmp/app.tar.gz 95.142.47.115:/root

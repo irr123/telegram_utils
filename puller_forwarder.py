@@ -18,27 +18,20 @@ class Ollama:
     async def complete(
         self,
         user_prompt: str,
-        sys_prompt: str | None = None,
-        model: str = "qwen2.5:0.5b-instruct-q4_K_M",
+        sys_prompt: str,
+        model: str = "llama3.2:1b-instruct-q4_K_M",
     ) -> tuple[tuple[dict, dict], str]:
-        messages = (
-            {"role": "user", "content": user_prompt},
-            {"role": "system", "content": sys_prompt},
-        )
-        if sys_prompt is None:
-            messages = messages[1:]
         payload = {
             "model": model,
-            "messages": messages,
+            "system": sys_prompt,
+            "prompt": user_prompt,
             "stream": False,
             "options": {
                 "temperature": 0.0,
-                "top_p": 0.9,
             },
         }
-
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(f"{self.base_url}/api/chat", json=payload)
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(f"{self.base_url}/api/generate", json=payload)
             try:
                 resp.raise_for_status()
             except Exception as e:
@@ -46,8 +39,8 @@ class Ollama:
 
             result = resp.json()
 
-        text = result.get("message", {}).get("content", "[]")
-        return (payload, result), text.strip().removeprefix("```json").removesuffix("```")
+        text = result["response"].strip() or "[]"
+        return (payload, result), text.removeprefix("```json").removesuffix("```")
 
 
 class Calendar:
@@ -89,7 +82,7 @@ CRITICAL RULES:
   5. No date? → SKIP
 - Year inference: if month-day ≥ {current_month_day_formatted} → {current_year}, else {next_year}
 
-OUTPUT ONLY VALID JSON. NO TEXT. NO EXPLANATIONS."""  # noqa: E501
+RETURN ONLY VALID JSON. NO TEXT. NO EXPLANATIONS."""  # noqa: E501
 
 
 def make_prompt(message_date: dt.datetime) -> str:
@@ -172,25 +165,26 @@ async def setup(
                 print(f"{sender_name}: {e}")
                 return
 
-            for event_dict in events_list:
+            if isinstance(events_list, dict):
+                events_list = [events_list]
+
+            for ev in events_list:
                 try:
-                    ev_date = dt.datetime.strptime(event_dict["date"], "%Y-%m-%d")
+                    ev_date = dt.datetime.strptime(ev["date"], "%Y-%m-%d")
                 except Exception as e:
                     print(f"{sender_name}: {e}")
                     continue
 
-                summary = event_dict.get(
-                    "summary", f"{sender_name}: {message.message[:32]}"
-                )
+                summary = ev.get("summary", f"{sender_name}: {message.message[:32]}")
                 link = f"https://t.me/{dest_username}/{forwarded.id}"
 
                 try:
-                    ev = await calendar.publish(ev_date, summary, link)
+                    ev_cal = await calendar.publish(ev_date, summary, link)
                 except Exception as e:
                     print(f"{sender_name}: {e}")
                     continue
 
-                print(f"{sender_name} 3: {ev}")
+                print(f"{sender_name} 3: {ev_cal}")
 
 
 async def main():
