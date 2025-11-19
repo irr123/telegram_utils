@@ -25,9 +25,6 @@ session:
 
 .PHONY: release
 release: fmt lint
-	docker build . -f Dockerfile -t c1rno/private:tg8
-	docker push c1rno/private:tg8
-	# tar --exclude='./.git' \
-	# 	-czvf /tmp/app.tar.gz .
-	# rsync -avz --progress /tmp/app.tar.gz 95.142.47.115:/root
-	# and on host: rm -rf /root/telegram_utils/* && tar -xzvf /root/app.tar.gz -C /root/telegram_utils
+	docker build . -f Dockerfile -t c1rno/private:latest
+	docker tag c1rno/private:latest c1rno/private:tg12
+	docker push c1rno/private:tg12

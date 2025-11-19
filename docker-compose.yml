@@ -2,31 +2,27 @@ volumes:
   ollama_data:
 
 services:
-  ollama:
-    image: ollama/ollama:0.12.11
-    container_name: ollama
-    restart: unless-stopped
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    environment:
-      - OLLAMA_MAX_LOADED_MODELS=1
-      - OLLAMA_NOHISTORY=1
-      - OLLAMA_NUM_PARALLEL=1
-    deploy:
-      resources:
-        limits:
-          memory: 1000M
+  # ollama:
+  #   image: ollama/ollama:0.12.11
+  #   container_name: ollama
+  #   restart: unless-stopped
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #   environment:
+  #     - OLLAMA_MAX_LOADED_MODELS=1
+  #     - OLLAMA_NOHISTORY=1
+  #     - OLLAMA_NUM_PARALLEL=1
     # plus:
     # docker compose exec ollama ollama pull qwen3:0.6b-q4_K_M
 
   app:
-    image: c1rno/private:tg6
+    image: c1rno/private:latest
+    build:
+      context: .
     container_name: tg_puller
     restart: always
-    environment:
-      - OLLAMA_HOST=http://ollama:11434
     volumes:
       - ./.env:/opt/app/.env:ro
       - ./credentials.json:/opt/app/credentials.json:ro
