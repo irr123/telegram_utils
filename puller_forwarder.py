@@ -115,7 +115,7 @@ class Gemini:
         self,
         user_prompt: str,
         sys_prompt: str | None = None,
-        model: str = "gemini-flash-latest",
+        model: str = "gemini-flash-lite-latest",
     ) -> list[dict]:
         response_schema = {
             "type": "ARRAY",

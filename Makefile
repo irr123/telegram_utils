@@ -25,6 +25,6 @@ session:
 
 .PHONY: release
 release: fmt lint
-	docker build . -f Dockerfile -t c1rno/private:latest
-	docker tag c1rno/private:latest c1rno/private:tg12
-	docker push c1rno/private:tg12
+	docker build --platform linux/amd64 . -f Dockerfile -t c1rno/private:latest
+	docker tag c1rno/private:latest c1rno/private:tg15
+	docker push c1rno/private:tg15
