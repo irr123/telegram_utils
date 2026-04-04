@@ -3,9 +3,11 @@ import datetime as dt
 import json
 import logging
 import os
+import re
 import sys
+from typing import Any
 
-import google.generativeai as genai
+import httplib2
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from telethon import TelegramClient, events
@@ -67,89 +69,261 @@ logging.basicConfig(level=logging.INFO, handlers=[handler])
 logger = logging.getLogger("app")
 
 
-PROMPT_TEMPLATE = """### CONTEXT (Current Date & Reference)
-- **Current Date:** {now_date_iso}
-- **Week Context:**
-  - Monday: {monday_iso}
-  - Tuesday: {tuesday_iso}
-  - Wednesday: {wednesday_iso}
-  - Thursday: {thursday_iso}
-  - Friday: {friday_iso}
-  - Saturday: {saturday_iso} (Weekend Start)
-  - Sunday: {sunday_iso}
+PROMPT_TEMPLATE = """Extract public events from the message.
 
-### GOAL
-Extract **public, participatory events** from the provided text. Return a list of events. If no events are found, return an empty list.
+Ignore services, ads, generic announcements.
+Include only real events people can attend with a specific date/time.
 
-### CRITICAL FILTERS (Strictly Apply)
-1. **INCLUDE ONLY:**
-   - Events with a specific start time/date where a human can physically go or join online.
-   - Examples: Concerts, meetups, workshops, screenings, stand-up comedy, exhibitions, lectures, guided tours.
-   - **Key Signal:** Look for venues ("at Dorcol Platz"), times ("starts at 19:00"), or entry details ("tickets", "free entry").
+Return JSON only in exact format:
+{{"events":[{{"date":"YYYY-MM-DD","summary":"short text"}}]}}
 
-2. **EXCLUDE (False Positives):**
-   - **Services:** Resume reviews, coaching sessions, beauty salons, recurring yoga classes *without* a specific "special event" label.
-   - **Announcements:** "New cafe opened", "Flight launched", "Strike details", "Museum is free on Sundays" (unless a specific Sunday is mentioned).
-   - **Calls to Action:** "Donate now", "Subscribe to channel".
-   - **Past Events:** Any date prior to {now_date_iso}.
-
-### SUMMARY STYLE GUIDE
-- **Language:** Keep original language (Russian/Serbian).
-- **Format:** "Event Name @ Venue" or "Event Type: Description".
-- **Length:** Max 7 words. No emojis.
-- **Bad:** "We invite you to come join us for a wonderful evening of jazz at the club..."
-- **Good:** "Jazz Night @ Blue Note Club"
-
-### DATE LOGIC
-- If "Today" -> {now_date_iso}
-- If "Tomorrow" -> Calculate based on {now_date_iso}
-- If "This Weekend" -> Use {saturday_iso}
-- If specific date (e.g., "25.05") -> Use current year ({current_year}), unless date < {current_month_day_formatted}, then use {next_year}."""  # noqa: E501
+Rules:
+- If there are no events, return {{"events":[]}}
+- No markdown or extra text
+- Summary must be short, clear, and in English
+- Use "Event @ Place" when place is obvious
+- Date must be YYYY-MM-DD
+- Today = {now_date_iso}
+- Tomorrow = the next day after {now_date_iso}
+- If a date has no year, use {current_year} unless already past, then use {next_year}"""
 
 
-class Gemini:
-    def __init__(self, api_key: str):
-        genai.configure(api_key=api_key)
+class OpenAICompatibleLLM:
+    BASE_URL = "https://opencode.ai/zen/v1"
+
+    FALLBACK_MODELS = [
+        "big-pickle",
+        "gpt-5-nano",
+        "minimax-m2.5-free",
+        "mimo-v2-pro-free",
+        "qwen3.6-plus-free",
+        "nemotron-3-super-free",
+    ]
+    MODEL = FALLBACK_MODELS[0]
+
+    def __init__(self, api_key: str | None = None):
+        self._api_key = api_key
+        self._http = httplib2.Http()
+
+    def _extract_json_from_text(self, text: str) -> dict[str, Any]:
+        logger.debug(
+            "Parsing model output",
+            extra={"output": text[:200] + "..." if len(text) > 200 else text},
+        )
+
+        try:
+            result = json.loads(text.strip())
+            logger.debug("Direct JSON parse succeeded")
+            return result
+        except json.JSONDecodeError:
+            logger.debug("Direct JSON parse failed")
+
+        json_pattern = r"```(?:json)?\s*(\{.*?\})\s*```"
+        matches = re.findall(json_pattern, text, re.DOTALL | re.IGNORECASE)
+        for match in matches:
+            try:
+                result = json.loads(match.strip())
+                logger.debug("Markdown fence JSON parse succeeded")
+                return result
+            except json.JSONDecodeError:
+                continue
+        if matches:
+            logger.debug("Markdown fence JSON parse failed")
+
+        json_object_pattern = r'\{[^{}]*"events"[^{}]*\[[^\]]*\][^{}]*\}'
+        matches = re.findall(json_object_pattern, text, re.DOTALL)
+        for match in matches:
+            try:
+                result = json.loads(match.strip())
+                logger.debug("Events object pattern parse succeeded")
+                return result
+            except json.JSONDecodeError:
+                continue
+        if matches:
+            logger.debug("Events object pattern parse failed")
+
+        array_pattern = r"\[(?:[^[\]]*\{[^{}]*\}[^[\]]*)+\]"
+        matches = re.findall(array_pattern, text, re.DOTALL)
+        for match in matches:
+            try:
+                events_array = json.loads(match.strip())
+                logger.debug("JSON array parse succeeded")
+                return {"events": events_array}
+            except json.JSONDecodeError:
+                continue
+        if matches:
+            logger.debug("JSON array parse failed")
+
+        string_array_pattern = r'^\s*"?\[([^\[\]]+)\]"?\s*$'
+        if re.match(string_array_pattern, text.strip()):
+            logger.debug("Model returned string array instead of JSON")
+            return {"events": []}
+
+        logger.debug("All parsing strategies failed", extra={"text_length": len(text)})
+        return {"events": []}
+
+    async def _make_request(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        """Make HTTP request with fail-fast strategy - no retries."""
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "*/*",
+            "User-Agent": "curl/8.7.1",
+        }
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+
+        url = f"{self.BASE_URL}/chat/completions"
+        body = json.dumps(payload).encode("utf-8")
+
+        try:
+
+            def make_request():
+                return self._http.request(
+                    uri=url, method="POST", body=body, headers=headers
+                )
+
+            response, content = await asyncio.to_thread(make_request)
+
+            if response.status != 200:
+                logger.debug(
+                    f"HTTP {response.status} - switching model",
+                    extra={"status": response.status},
+                )
+                return None
+
+            try:
+                data = json.loads(content.decode("utf-8"))
+            except json.JSONDecodeError:
+                logger.debug("Invalid JSON response - switching model")
+                return None
+
+            if data.get("error"):
+                logger.debug(
+                    "API error - switching model", extra={"error": data["error"]}
+                )
+                return None
+
+            return data
+
+        except Exception as e:
+            logger.debug("Request failed - switching model", extra={"error": str(e)})
+            return None
+
+    async def _try_model(
+        self,
+        model: str,
+        user_prompt: str,
+        sys_prompt: str | None = None,
+    ) -> list[dict] | None:
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": sys_prompt or ""},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        logger.debug(
+            "Trying model",
+            extra={
+                "model": model,
+                "url": f"{self.BASE_URL}/chat/completions",
+            },
+        )
+        try:
+            data = await self._make_request(payload)
+            if not data:
+                return None
+            try:
+                output_text = data["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError):
+                logger.debug(f"Invalid response structure from {model}")
+                return None
+
+            parsed = self._extract_json_from_text(output_text)
+            events = parsed.get("events", [])
+
+            normalized = []
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                date = event.get("date", "")
+                if "T" in date:
+                    date = date.split("T", 1)[0]
+                summary = event.get("summary", "")
+                if date and summary:
+                    normalized.append({"date": date, "summary": summary})
+
+            logger.debug(
+                "Successfully extracted events",
+                extra={
+                    "model": model,
+                    "event_count": len(normalized),
+                },
+            )
+            return normalized
+
+        except Exception as e:
+            logger.debug(f"Model {model} failed", extra={"error": str(e)})
+            return None
+
+            output_text = None
+            for item in data.get("output", []):
+                if item.get("type") != "message":
+                    continue
+                for content in item.get("content", []):
+                    if content.get("type") == "output_text":
+                        text = content.get("text")
+                        if isinstance(text, str):
+                            output_text = text
+                        break
+                if output_text:
+                    break
+
+            if not output_text:
+                logger.error(
+                    "Model returned no output text",
+                    extra={"model": model, "response": data},
+                )
+                return None
+
+            parsed = self._extract_json_from_text(output_text)
+            events = parsed.get("events", [])
+
+            normalized = []
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                date = event.get("date", "")
+                if "T" in date:
+                    date = date.split("T", 1)[0]
+                summary = event.get("summary", "")
+                if date and summary:
+                    normalized.append({"date": date, "summary": summary})
 
     async def complete(
         self,
         user_prompt: str,
         sys_prompt: str | None = None,
-        model: str = "gemini-flash-lite-latest",
     ) -> list[dict]:
-        response_schema = {
-            "type": "ARRAY",
-            "items": {
-                "type": "OBJECT",
-                "properties": {
-                    "date": {
-                        "type": "STRING",
-                        "description": "ISO 8601 date YYYY-MM-DD",
-                    },
-                    "summary": {
-                        "type": "STRING",
-                        "description": "Short title of the event",
-                    },
-                },
-                "required": ["date", "summary"],
-            },
-        }
+        """Complete request using fail-fast fallback strategy."""
 
-        m = genai.GenerativeModel(model_name=model, system_instruction=sys_prompt)
-        try:
-            resp = await m.generate_content_async(
-                user_prompt,
-                generation_config=genai.GenerationConfig(
-                    response_mime_type="application/json",
-                    response_schema=response_schema,
-                    candidate_count=1,
-                    temperature=0.0,
-                ),
+        for i, model in enumerate(self.FALLBACK_MODELS):
+            logger.debug(
+                f"Attempting model {i + 1}/{len(self.FALLBACK_MODELS)}: {model}"
             )
-            return json.loads(resp.text)
-        except Exception as e:
-            logger.warning("Gemini API error", exc_info=e)
-            return []
+            result = await self._try_model(model, user_prompt, sys_prompt)
+            if result is not None:
+                logger.info(
+                    f"Success with model: {model}",
+                    extra={
+                        "model": model,
+                        "event_count": len(result),
+                    },
+                )
+                return result
+
+        logger.error("All fallback models failed")
+        return []
 
 
 class Calendar:
@@ -188,36 +362,17 @@ class Calendar:
 
 def make_prompt(date: dt.datetime) -> str:
     base_dt = date.date()
-    today_weekday = base_dt.weekday()
-
-    day_names = [
-        "monday",
-        "tuesday",
-        "wednesday",
-        "thursday",
-        "friday",
-        "saturday",
-        "sunday",
-    ]
-    week_dates = {
-        f"{day_names[i]}_iso": (
-            base_dt + dt.timedelta(days=(i - today_weekday + 7) % 7)
-        ).isoformat()
-        for i in range(7)
-    }
 
     return PROMPT_TEMPLATE.format(
         current_year=base_dt.year,
         next_year=base_dt.year + 1,
-        current_month_day_formatted=base_dt.strftime("%m-%d"),
         now_date_iso=base_dt.isoformat(),
-        **week_dates,
     )
 
 
 async def setup_bot(
     tg: TelegramClient,
-    llm: Gemini,
+    llm: OpenAICompatibleLLM,
     calendar: Calendar,
     dst: str,
     src: tuple[str, ...],
@@ -254,6 +409,8 @@ async def setup_bot(
 
         try:
             forwarded = await message.forward_to(dest_entity)
+            if not forwarded:
+                raise RuntimeError("Message was not forwarded")
             link = f"https://t.me/{dest_username}/{forwarded.id}"
         except Exception as e:
             logger.error("Forward message error", exc_info=e)
@@ -279,8 +436,7 @@ async def setup_bot(
 async def main():
     cal_id = os.getenv("CALENDAR_ID")
     assert cal_id
-    api_key = os.getenv("GEMINI_API_KEY")
-    assert api_key
+    api_key = os.getenv("OPENAI_COMPATIBLE_API_KEY")
     session_str = os.getenv("SESSION")
     assert session_str
     api_id = os.getenv("TG_API_ID")
@@ -289,7 +445,7 @@ async def main():
     assert api_hash
 
     calendar = Calendar(cal_id)
-    llm = Gemini(api_key)
+    llm = OpenAICompatibleLLM(api_key)
     session = StringSession(session_str)
 
     async with TelegramClient(session, int(api_id), api_hash) as tg:
@@ -325,6 +481,9 @@ async def main():
                 "https://t.me/volna_srbjia",
                 "https://t.me/vstrechi_v_belgrade",
                 "https://t.me/zarko_tusic",
+                "https://t.me/noda_space",
+                "https://t.me/xecut_bg",
+                "https://t.me/neka_beograd",
             ),
         )
 
