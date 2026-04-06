@@ -3,9 +3,8 @@ import datetime as dt
 import json
 import logging
 import os
-import re
 import sys
-from typing import Any
+import typing as t
 
 import httplib2
 from google.oauth2.service_account import Credentials
@@ -70,8 +69,6 @@ logger = logging.getLogger("app")
 
 
 PROMPT_TEMPLATE = """Extract public events from the message.
-
-Ignore services, ads, generic announcements.
 Include only real events people can attend with a specific date/time.
 
 Return JSON only in exact format:
@@ -80,7 +77,7 @@ Return JSON only in exact format:
 Rules:
 - If there are no events, return {{"events":[]}}
 - No markdown or extra text
-- Summary must be short, clear, and in English
+- Summary must be short, clear, and English
 - Use "Event @ Place" when place is obvious
 - Date must be YYYY-MM-DD
 - Today = {now_date_iso}
@@ -90,80 +87,30 @@ Rules:
 
 class OpenAICompatibleLLM:
     BASE_URL = "https://opencode.ai/zen/v1"
-
-    FALLBACK_MODELS = [
+    FALLBACK_MODELS = (
         "big-pickle",
         "gpt-5-nano",
         "minimax-m2.5-free",
         "mimo-v2-pro-free",
         "qwen3.6-plus-free",
         "nemotron-3-super-free",
-    ]
+    )
     MODEL = FALLBACK_MODELS[0]
 
     def __init__(self, api_key: str | None = None):
         self._api_key = api_key
         self._http = httplib2.Http()
 
-    def _extract_json_from_text(self, text: str) -> dict[str, Any]:
-        logger.debug(
-            "Parsing model output",
-            extra={"output": text[:200] + "..." if len(text) > 200 else text},
-        )
-
+    def _extract_json_from_text(self, text: str) -> dict[str, t.Any]:
+        tmp_txt = text[:200] + "..." if len(text) > 200 else text
+        logger.debug("Parsing model output", extra={"output": tmp_txt})
         try:
-            result = json.loads(text.strip())
-            logger.debug("Direct JSON parse succeeded")
-            return result
+            return json.loads(text.strip())
         except json.JSONDecodeError:
-            logger.debug("Direct JSON parse failed")
-
-        json_pattern = r"```(?:json)?\s*(\{.*?\})\s*```"
-        matches = re.findall(json_pattern, text, re.DOTALL | re.IGNORECASE)
-        for match in matches:
-            try:
-                result = json.loads(match.strip())
-                logger.debug("Markdown fence JSON parse succeeded")
-                return result
-            except json.JSONDecodeError:
-                continue
-        if matches:
-            logger.debug("Markdown fence JSON parse failed")
-
-        json_object_pattern = r'\{[^{}]*"events"[^{}]*\[[^\]]*\][^{}]*\}'
-        matches = re.findall(json_object_pattern, text, re.DOTALL)
-        for match in matches:
-            try:
-                result = json.loads(match.strip())
-                logger.debug("Events object pattern parse succeeded")
-                return result
-            except json.JSONDecodeError:
-                continue
-        if matches:
-            logger.debug("Events object pattern parse failed")
-
-        array_pattern = r"\[(?:[^[\]]*\{[^{}]*\}[^[\]]*)+\]"
-        matches = re.findall(array_pattern, text, re.DOTALL)
-        for match in matches:
-            try:
-                events_array = json.loads(match.strip())
-                logger.debug("JSON array parse succeeded")
-                return {"events": events_array}
-            except json.JSONDecodeError:
-                continue
-        if matches:
-            logger.debug("JSON array parse failed")
-
-        string_array_pattern = r'^\s*"?\[([^\[\]]+)\]"?\s*$'
-        if re.match(string_array_pattern, text.strip()):
-            logger.debug("Model returned string array instead of JSON")
+            logger.debug("Direct JSON parse failed", extra={"output": tmp_txt})
             return {"events": []}
 
-        logger.debug("All parsing strategies failed", extra={"text_length": len(text)})
-        return {"events": []}
-
-    async def _make_request(self, payload: dict[str, Any]) -> dict[str, Any] | None:
-        """Make HTTP request with fail-fast strategy - no retries."""
+    async def _make_request(self, payload: dict[str, t.Any]) -> dict[str, t.Any] | None:
         headers = {
             "Content-Type": "application/json",
             "Accept": "*/*",
@@ -183,18 +130,29 @@ class OpenAICompatibleLLM:
                 )
 
             response, content = await asyncio.to_thread(make_request)
-
             if response.status != 200:
                 logger.debug(
                     f"HTTP {response.status} - switching model",
-                    extra={"status": response.status},
+                    extra={
+                        "status": response.status,
+                        "response_body": content.decode("utf-8", errors="replace")[
+                            :1000
+                        ],
+                    },
                 )
                 return None
 
             try:
                 data = json.loads(content.decode("utf-8"))
             except json.JSONDecodeError:
-                logger.debug("Invalid JSON response - switching model")
+                logger.debug(
+                    "Invalid JSON response - switching model",
+                    extra={
+                        "response_body": content.decode("utf-8", errors="replace")[
+                            :1000
+                        ]
+                    },
+                )
                 return None
 
             if data.get("error"):
@@ -206,7 +164,10 @@ class OpenAICompatibleLLM:
             return data
 
         except Exception as e:
-            logger.debug("Request failed - switching model", extra={"error": str(e)})
+            logger.debug(
+                "Request failed - switching model",
+                extra={"error": str(e), "error_type": type(e).__name__},
+            )
             return None
 
     async def _try_model(
@@ -224,15 +185,13 @@ class OpenAICompatibleLLM:
         }
         logger.debug(
             "Trying model",
-            extra={
-                "model": model,
-                "url": f"{self.BASE_URL}/chat/completions",
-            },
+            extra={"model": model, "url": f"{self.BASE_URL}/chat/completions"},
         )
         try:
             data = await self._make_request(payload)
             if not data:
                 return None
+
             try:
                 output_text = data["choices"][0]["message"]["content"]
             except (KeyError, IndexError, TypeError):
@@ -255,10 +214,7 @@ class OpenAICompatibleLLM:
 
             logger.debug(
                 "Successfully extracted events",
-                extra={
-                    "model": model,
-                    "event_count": len(normalized),
-                },
+                extra={"model": model, "event_count": len(normalized)},
             )
             return normalized
 
@@ -266,47 +222,11 @@ class OpenAICompatibleLLM:
             logger.debug(f"Model {model} failed", extra={"error": str(e)})
             return None
 
-            output_text = None
-            for item in data.get("output", []):
-                if item.get("type") != "message":
-                    continue
-                for content in item.get("content", []):
-                    if content.get("type") == "output_text":
-                        text = content.get("text")
-                        if isinstance(text, str):
-                            output_text = text
-                        break
-                if output_text:
-                    break
-
-            if not output_text:
-                logger.error(
-                    "Model returned no output text",
-                    extra={"model": model, "response": data},
-                )
-                return None
-
-            parsed = self._extract_json_from_text(output_text)
-            events = parsed.get("events", [])
-
-            normalized = []
-            for event in events:
-                if not isinstance(event, dict):
-                    continue
-                date = event.get("date", "")
-                if "T" in date:
-                    date = date.split("T", 1)[0]
-                summary = event.get("summary", "")
-                if date and summary:
-                    normalized.append({"date": date, "summary": summary})
-
     async def complete(
         self,
         user_prompt: str,
         sys_prompt: str | None = None,
     ) -> list[dict]:
-        """Complete request using fail-fast fallback strategy."""
-
         for i, model in enumerate(self.FALLBACK_MODELS):
             logger.debug(
                 f"Attempting model {i + 1}/{len(self.FALLBACK_MODELS)}: {model}"
@@ -315,10 +235,7 @@ class OpenAICompatibleLLM:
             if result is not None:
                 logger.info(
                     f"Success with model: {model}",
-                    extra={
-                        "model": model,
-                        "event_count": len(result),
-                    },
+                    extra={"model": model, "event_count": len(result)},
                 )
                 return result
 
@@ -335,11 +252,14 @@ class Calendar:
         if not os.path.exists(self.S_ACCOUNT_FILE):
             raise FileNotFoundError(f"Missing credentials file: {self.S_ACCOUNT_FILE}")
 
+        self._client = self._create_client()
+
+    def _create_client(self):
         creds = Credentials.from_service_account_file(
             self.S_ACCOUNT_FILE,
             scopes=self.SCOPES,
         )
-        self._client = build("calendar", "v3", credentials=creds)
+        return build("calendar", "v3", credentials=creds)
 
     async def publish(self, ev_date: dt.datetime, summary: str, link: str):
         ev = {
@@ -351,13 +271,29 @@ class Calendar:
                 "timeZone": "UTC",
             },
         }
+
         try:
             req = self._client.events().insert(calendarId=self._cal_id, body=ev)
             result = await asyncio.to_thread(req.execute)
             return result.get("htmlLink")
         except Exception as e:
-            logger.error("Calendar publish error", exc_info=e)
-            raise
+            logger.warning(
+                "Calendar publish failed, recreating connection and retrying",
+                exc_info=e,
+                extra={"attempt": 1},
+            )
+
+            try:
+                self._client = self._create_client()
+                req = self._client.events().insert(calendarId=self._cal_id, body=ev)
+                result = await asyncio.to_thread(req.execute)
+                logger.info(
+                    "Calendar publish succeeded on retry", extra={"summary": summary}
+                )
+                return result.get("htmlLink")
+            except Exception as retry_e:
+                logger.error("Calendar publish error after retry", exc_info=retry_e)
+                raise
 
 
 def make_prompt(date: dt.datetime) -> str:
@@ -484,6 +420,7 @@ async def main():
                 "https://t.me/noda_space",
                 "https://t.me/xecut_bg",
                 "https://t.me/neka_beograd",
+                "https://t.me/technoblok77",
             ),
         )
 
