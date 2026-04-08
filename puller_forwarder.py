@@ -1,10 +1,12 @@
 import asyncio
 import datetime as dt
+import difflib
 import json
 import logging
 import os
 import sys
 import typing as t
+from collections import defaultdict
 
 import httplib2
 from google.oauth2.service_account import Credentials
@@ -97,7 +99,7 @@ class OpenAICompatibleLLM:
     )
     MODEL = FALLBACK_MODELS[0]
 
-    def __init__(self, api_key: str | None = None):
+    def __init__(self, api_key: str | None):
         self._api_key = api_key
         self._http = httplib2.Http()
 
@@ -247,12 +249,21 @@ class Calendar:
     SCOPES = ("https://www.googleapis.com/auth/calendar.events",)
     S_ACCOUNT_FILE = "./credentials.json"
 
-    def __init__(self, cal_id: str):
+    def __init__(self, cal_id: str | None):
+        assert cal_id
         self._cal_id = cal_id
         if not os.path.exists(self.S_ACCOUNT_FILE):
             raise FileNotFoundError(f"Missing credentials file: {self.S_ACCOUNT_FILE}")
 
         self._client = self._create_client()
+
+    @staticmethod
+    def normalize_summary(summary: str) -> str:
+        return " ".join(summary.lower().strip().split())
+
+    @staticmethod
+    def is_similar(a: str, b: str, threshold: float = 0.65) -> bool:
+        return difflib.SequenceMatcher(None, a, b).ratio() >= threshold
 
     def _create_client(self):
         creds = Credentials.from_service_account_file(
@@ -260,6 +271,44 @@ class Calendar:
             scopes=self.SCOPES,
         )
         return build("calendar", "v3", credentials=creds)
+
+    async def get_existing_events(self, target_date: dt.datetime) -> set[str]:
+        try:
+            date_str = target_date.date().isoformat()
+            next_date_str = (target_date.date() + dt.timedelta(days=1)).isoformat()
+
+            req = self._client.events().list(
+                calendarId=self._cal_id,
+                timeMin=f"{date_str}T00:00:00Z",
+                timeMax=f"{next_date_str}T00:00:00Z",
+                singleEvents=True,
+                orderBy="startTime",
+            )
+            result = await asyncio.to_thread(req.execute)
+
+            existing_summaries = set()
+            for event in result.get("items", []):
+                if "summary" in event:
+                    normalized = self.normalize_summary(event["summary"])
+                    existing_summaries.add(normalized)
+
+            logger.debug(
+                "Found existing events for date",
+                extra={
+                    "date": date_str,
+                    "count": len(existing_summaries),
+                    "summaries": list(existing_summaries),
+                },
+            )
+            return existing_summaries
+
+        except Exception as e:
+            logger.warning(
+                "Failed to fetch existing events, proceeding without deduplication",
+                exc_info=e,
+                extra={"date": target_date.date().isoformat()},
+            )
+            return set()
 
     async def publish(self, ev_date: dt.datetime, summary: str, link: str):
         ev = {
@@ -343,6 +392,34 @@ async def setup_bot(
 
         logger.info("Extracted", extra={"count": len(events_list), "data": events_list})
 
+        events_by_date = defaultdict(list)
+        for ev in events_list:
+            try:
+                ev_date = dt.datetime.strptime(ev["date"], "%Y-%m-%d")
+                events_by_date[ev_date].append(ev)
+            except Exception as e:
+                logger.error(
+                    "Invalid event date format", exc_info=e, extra={"event": ev}
+                )
+                continue
+
+        all_unique_events = []
+        for ev_date, date_events in events_by_date.items():
+            existing_summaries = await calendar.get_existing_events(ev_date)
+            for ev in date_events:
+                normalized_summary = calendar.normalize_summary(ev["summary"])
+                is_dup = any(
+                    calendar.is_similar(normalized_summary, s)
+                    for s in existing_summaries
+                )
+                if not is_dup:
+                    all_unique_events.append((ev_date, ev))
+                    existing_summaries.add(normalized_summary)
+
+        if not all_unique_events:
+            logger.info("No new events after dedup", extra={"sender": sender_name})
+            return
+
         try:
             forwarded = await message.forward_to(dest_entity)
             if not forwarded:
@@ -352,26 +429,27 @@ async def setup_bot(
             logger.error("Forward message error", exc_info=e)
             return
 
-        for ev in events_list:
+        for ev_date, ev in all_unique_events:
             try:
-                ev_date = dt.datetime.strptime(ev["date"], "%Y-%m-%d")
                 summary = ev["summary"]
-
                 cal_link = await calendar.publish(ev_date, summary, link)
                 logger.info(
                     "Calendar publish success",
-                    extra={"summary": summary, "date": ev["date"], "link": cal_link},
+                    extra={
+                        "summary": summary,
+                        "date": ev["date"],
+                        "link": cal_link,
+                    },
                 )
             except Exception as e:
                 logger.error("Calendar publish error", exc_info=e, extra={"event": ev})
 
     logger.info("Bot started and listening...")
-    await tg.run_until_disconnected()
+    await t.cast(t.Any, tg.run_until_disconnected())
 
 
 async def main():
     cal_id = os.getenv("CALENDAR_ID")
-    assert cal_id
     api_key = os.getenv("OPENAI_COMPATIBLE_API_KEY")
     session_str = os.getenv("SESSION")
     assert session_str

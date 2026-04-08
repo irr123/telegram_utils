@@ -1,8 +1,8 @@
 -include $(PWD)/.env
 export
 
-.PHONY: fmt
-fmt:
+.PHONY: format
+format:
 	ruff format $(PWD)
 
 .PHONY: lint
@@ -24,7 +24,7 @@ session:
 	node ./puller_forwarder/store_tg_session.mjs
 
 .PHONY: release
-release: fmt lint
+release: format lint
 	docker build --platform linux/amd64 . -f Dockerfile -t c1rno/private:latest
-	docker tag c1rno/private:latest c1rno/private:tg17
-	docker push c1rno/private:tg17
+	docker tag c1rno/private:latest c1rno/private:tg19
+	docker push c1rno/private:tg19
