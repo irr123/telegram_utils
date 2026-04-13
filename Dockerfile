@@ -1,5 +1,5 @@
 ARG BASE_IMAGE=python:3.14-slim-trixie
-ARG UV_VERSION=0.10.4-python3.14-trixie-slim
+ARG UV_VERSION=0.11.6-python3.14-trixie-slim
 
 FROM ghcr.io/astral-sh/uv:$UV_VERSION AS uv_carrier
 FROM $BASE_IMAGE AS builder

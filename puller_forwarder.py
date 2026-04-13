@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import typing as t
 from collections import defaultdict
 
@@ -19,7 +20,7 @@ from telethon.tl.custom import Message
 class StructuredFormatter(logging.Formatter):
     def format(self, record):
         s = super().format(record)
-        standard_attribs = {
+        std_atts = {
             "args",
             "asctime",
             "created",
@@ -44,10 +45,7 @@ class StructuredFormatter(logging.Formatter):
             "threadName",
             "taskName",
         }
-        extra_data = {
-            k: v for k, v in record.__dict__.items() if k not in standard_attribs
-        }
-
+        extra_data = {k: v for k, v in record.__dict__.items() if k not in std_atts}
         if extra_data:
             try:
                 json_extras = json.dumps(extra_data, default=repr, ensure_ascii=False)
@@ -87,6 +85,22 @@ Rules:
 - If a date has no year, use {current_year} unless already past, then use {next_year}"""
 
 
+class ThreadSafeHttpClient:
+    def __init__(self):
+        self._http = httplib2.Http()
+        self._lock = threading.Lock()
+
+    def request(
+        self,
+        uri: str,
+        method: str = "GET",
+        body: bytes | None = None,
+        headers: dict | None = None,
+    ):
+        with self._lock:
+            return self._http.request(uri, method=method, body=body, headers=headers)
+
+
 class OpenAICompatibleLLM:
     BASE_URL = "https://opencode.ai/zen/v1"
     FALLBACK_MODELS = (
@@ -101,7 +115,7 @@ class OpenAICompatibleLLM:
 
     def __init__(self, api_key: str | None):
         self._api_key = api_key
-        self._http = httplib2.Http()
+        self._http = ThreadSafeHttpClient()
 
     def _extract_json_from_text(self, text: str) -> dict[str, t.Any]:
         tmp_txt = text[:200] + "..." if len(text) > 200 else text
@@ -109,7 +123,7 @@ class OpenAICompatibleLLM:
         try:
             return json.loads(text.strip())
         except json.JSONDecodeError:
-            logger.debug("Direct JSON parse failed", extra={"output": tmp_txt})
+            logger.warning("Direct JSON parse failed", extra={"output": tmp_txt})
             return {"events": []}
 
     async def _make_request(self, payload: dict[str, t.Any]) -> dict[str, t.Any] | None:
@@ -124,52 +138,36 @@ class OpenAICompatibleLLM:
         url = f"{self.BASE_URL}/chat/completions"
         body = json.dumps(payload).encode("utf-8")
 
+        def make_request():
+            return self._http.request(url, method="POST", body=body, headers=headers)
+
         try:
-
-            def make_request():
-                return self._http.request(
-                    uri=url, method="POST", body=body, headers=headers
-                )
-
             response, content = await asyncio.to_thread(make_request)
             if response.status != 200:
-                logger.debug(
-                    f"HTTP {response.status} - switching model",
-                    extra={
-                        "status": response.status,
-                        "response_body": content.decode("utf-8", errors="replace")[
-                            :1000
-                        ],
-                    },
-                )
+                extra = {
+                    "status": response.status,
+                    "resp_body": content.decode("utf-8", errors="replace")[:999],
+                }
+                logger.warning(f"HTTP {response.status} - switching model", extra=extra)
                 return None
 
             try:
                 data = json.loads(content.decode("utf-8"))
             except json.JSONDecodeError:
-                logger.debug(
-                    "Invalid JSON response - switching model",
-                    extra={
-                        "response_body": content.decode("utf-8", errors="replace")[
-                            :1000
-                        ]
-                    },
-                )
+                extra = {"resp_body": content.decode("utf-8", errors="replace")[:999]}
+                logger.warning("Invalid JSON response - switching model", extra=extra)
                 return None
 
             if data.get("error"):
-                logger.debug(
-                    "API error - switching model", extra={"error": data["error"]}
-                )
+                extra = {"error": data["error"]}
+                logger.warning("API error - switching model", extra=extra)
                 return None
 
             return data
 
         except Exception as e:
-            logger.debug(
-                "Request failed - switching model",
-                extra={"error": str(e), "error_type": type(e).__name__},
-            )
+            extra = {"error": str(e), "error_type": type(e).__name__}
+            logger.warning("Request failed - switching model", extra=extra)
             return None
 
     async def _try_model(
@@ -185,10 +183,8 @@ class OpenAICompatibleLLM:
                 {"role": "user", "content": user_prompt},
             ],
         }
-        logger.debug(
-            "Trying model",
-            extra={"model": model, "url": f"{self.BASE_URL}/chat/completions"},
-        )
+        extra = {"model": model, "url": f"{self.BASE_URL}/chat/completions"}
+        logger.debug("Trying model", extra=extra)
         try:
             data = await self._make_request(payload)
             if not data:
@@ -197,12 +193,11 @@ class OpenAICompatibleLLM:
             try:
                 output_text = data["choices"][0]["message"]["content"]
             except (KeyError, IndexError, TypeError):
-                logger.debug(f"Invalid response structure from {model}")
+                logger.warning(f"Invalid response structure from {model}")
                 return None
 
             parsed = self._extract_json_from_text(output_text)
             events = parsed.get("events", [])
-
             normalized = []
             for event in events:
                 if not isinstance(event, dict):
@@ -214,14 +209,12 @@ class OpenAICompatibleLLM:
                 if date and summary:
                     normalized.append({"date": date, "summary": summary})
 
-            logger.debug(
-                "Successfully extracted events",
-                extra={"model": model, "event_count": len(normalized)},
-            )
+            extra = {"model": model, "event_count": len(normalized)}
+            logger.debug("Successfully extracted events", extra=extra)
             return normalized
 
         except Exception as e:
-            logger.debug(f"Model {model} failed", extra={"error": str(e)})
+            logger.warning(f"Model {model} failed", extra={"error": str(e)})
             return None
 
     async def complete(
@@ -230,15 +223,12 @@ class OpenAICompatibleLLM:
         sys_prompt: str | None = None,
     ) -> list[dict]:
         for i, model in enumerate(self.FALLBACK_MODELS):
-            logger.debug(
-                f"Attempting model {i + 1}/{len(self.FALLBACK_MODELS)}: {model}"
-            )
+            log_msg = f"Attempting model {i + 1}/{len(self.FALLBACK_MODELS)}: {model}"
+            logger.debug(log_msg)
             result = await self._try_model(model, user_prompt, sys_prompt)
             if result is not None:
-                logger.info(
-                    f"Success with model: {model}",
-                    extra={"model": model, "event_count": len(result)},
-                )
+                extra = {"model": model, "event_count": len(result)}
+                logger.info(f"Success with model: {model}", extra=extra)
                 return result
 
         logger.error("All fallback models failed")
@@ -256,6 +246,7 @@ class Calendar:
             raise FileNotFoundError(f"Missing credentials file: {self.S_ACCOUNT_FILE}")
 
         self._client = self._create_client()
+        self._client_lock = threading.Lock()
 
     @staticmethod
     def normalize_summary(summary: str) -> str:
@@ -272,6 +263,13 @@ class Calendar:
         )
         return build("calendar", "v3", credentials=creds)
 
+    async def _safe_execute(self, req):
+        def execute_with_lock():
+            with self._client_lock:
+                return req.execute()
+
+        return await asyncio.to_thread(execute_with_lock)
+
     async def get_existing_events(self, target_date: dt.datetime) -> set[str]:
         try:
             date_str = target_date.date().isoformat()
@@ -284,7 +282,7 @@ class Calendar:
                 singleEvents=True,
                 orderBy="startTime",
             )
-            result = await asyncio.to_thread(req.execute)
+            result = await self._safe_execute(req)
 
             existing_summaries = set()
             for event in result.get("items", []):
@@ -292,21 +290,20 @@ class Calendar:
                     normalized = self.normalize_summary(event["summary"])
                     existing_summaries.add(normalized)
 
-            logger.debug(
-                "Found existing events for date",
-                extra={
-                    "date": date_str,
-                    "count": len(existing_summaries),
-                    "summaries": list(existing_summaries),
-                },
-            )
+            extra = {
+                "date": date_str,
+                "count": len(existing_summaries),
+                "summaries": list(existing_summaries),
+            }
+            logger.debug("Found existing events for date", extra=extra)
             return existing_summaries
 
         except Exception as e:
+            extra = {"date": target_date.date().isoformat()}
             logger.warning(
                 "Failed to fetch existing events, proceeding without deduplication",
                 exc_info=e,
-                extra={"date": target_date.date().isoformat()},
+                extra=extra,
             )
             return set()
 
@@ -323,22 +320,22 @@ class Calendar:
 
         try:
             req = self._client.events().insert(calendarId=self._cal_id, body=ev)
-            result = await asyncio.to_thread(req.execute)
+            result = await self._safe_execute(req)
             return result.get("htmlLink")
         except Exception as e:
+            extra = {"attempt": 1}
             logger.warning(
                 "Calendar publish failed, recreating connection and retrying",
                 exc_info=e,
-                extra={"attempt": 1},
+                extra=extra,
             )
 
             try:
-                self._client = self._create_client()
+                with self._client_lock:
+                    self._client = self._create_client()
                 req = self._client.events().insert(calendarId=self._cal_id, body=ev)
-                result = await asyncio.to_thread(req.execute)
-                logger.info(
-                    "Calendar publish succeeded on retry", extra={"summary": summary}
-                )
+                result = await self._safe_execute(req)
+                logger.info("Calendar publish succeeded", extra={"summary": summary})
                 return result.get("htmlLink")
             except Exception as retry_e:
                 logger.error("Calendar publish error after retry", exc_info=retry_e)
@@ -398,9 +395,8 @@ async def setup_bot(
                 ev_date = dt.datetime.strptime(ev["date"], "%Y-%m-%d")
                 events_by_date[ev_date].append(ev)
             except Exception as e:
-                logger.error(
-                    "Invalid event date format", exc_info=e, extra={"event": ev}
-                )
+                extra = {"event": ev}
+                logger.error("Invalid event date format", exc_info=e, extra=extra)
                 continue
 
         all_unique_events = []
@@ -433,14 +429,8 @@ async def setup_bot(
             try:
                 summary = ev["summary"]
                 cal_link = await calendar.publish(ev_date, summary, link)
-                logger.info(
-                    "Calendar publish success",
-                    extra={
-                        "summary": summary,
-                        "date": ev["date"],
-                        "link": cal_link,
-                    },
-                )
+                extra = {"summary": summary, "date": ev["date"], "link": cal_link}
+                logger.info("Calendar publish success", extra=extra)
             except Exception as e:
                 logger.error("Calendar publish error", exc_info=e, extra={"event": ev})
 
