@@ -17,5 +17,5 @@ run:
 .PHONY: release
 release: format lint
 	docker build --platform linux/amd64 . -f Dockerfile -t c1rno/private:latest
-	docker tag c1rno/private:latest c1rno/private:tg29
-	docker push c1rno/private:tg29
+	docker tag c1rno/private:latest c1rno/private:tg30
+	docker push c1rno/private:tg30

@@ -5,47 +5,51 @@ import json
 import logging
 import os
 import sys
-import threading
 import typing as t
 from collections import defaultdict
 
+import google_auth_httplib2
 import httplib2
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.http import HttpRequest
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.custom import Message
 
 
 class StructuredFormatter(logging.Formatter):
+    STANDARD_ATTRIBS = {
+        "args",
+        "asctime",
+        "created",
+        "exc_info",
+        "exc_text",
+        "filename",
+        "funcName",
+        "levelname",
+        "levelno",
+        "lineno",
+        "message",
+        "module",
+        "msecs",
+        "msg",
+        "name",
+        "pathname",
+        "process",
+        "processName",
+        "relativeCreated",
+        "stack_info",
+        "thread",
+        "threadName",
+        "taskName",
+    }
+
     def format(self, record):
         s = super().format(record)
-        std_atts = {
-            "args",
-            "asctime",
-            "created",
-            "exc_info",
-            "exc_text",
-            "filename",
-            "funcName",
-            "levelname",
-            "levelno",
-            "lineno",
-            "message",
-            "module",
-            "msecs",
-            "msg",
-            "name",
-            "pathname",
-            "process",
-            "processName",
-            "relativeCreated",
-            "stack_info",
-            "thread",
-            "threadName",
-            "taskName",
+        extra_data = {
+            k: v for k, v in record.__dict__.items() if k not in self.STANDARD_ATTRIBS
         }
-        extra_data = {k: v for k, v in record.__dict__.items() if k not in std_atts}
         if extra_data:
             try:
                 json_extras = json.dumps(extra_data, default=repr, ensure_ascii=False)
@@ -85,20 +89,19 @@ Rules:
 - If a date has no year, use {current_year} unless already past, then use {next_year}"""
 
 
-class ThreadSafeHttpClient:
-    def __init__(self):
-        self._http = httplib2.Http()
-        self._lock = threading.Lock()
+class AsyncRateLimiter:
+    def __init__(self, min_interval: float = 1.0):
+        self._lock = asyncio.Lock()
+        self._last = 0.0
+        self._interval = min_interval
 
-    def request(
-        self,
-        uri: str,
-        method: str = "GET",
-        body: bytes | None = None,
-        headers: dict | None = None,
-    ):
-        with self._lock:
-            return self._http.request(uri, method=method, body=body, headers=headers)
+    async def acquire(self):
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            wait = self._interval - (loop.time() - self._last)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last = loop.time()
 
 
 class OpenAICompatibleLLM:
@@ -115,7 +118,7 @@ class OpenAICompatibleLLM:
 
     def __init__(self, api_key: str | None):
         self._api_key = api_key
-        self._http = ThreadSafeHttpClient()
+        self._rate_limiter = AsyncRateLimiter()
 
     def _extract_json_from_text(self, text: str) -> dict[str, t.Any]:
         tmp_txt = text[:200] + "..." if len(text) > 200 else text
@@ -139,7 +142,10 @@ class OpenAICompatibleLLM:
         body = json.dumps(payload).encode("utf-8")
 
         def make_request():
-            return self._http.request(url, method="POST", body=body, headers=headers)
+            http = httplib2.Http()
+            return http.request(url, method="POST", body=body, headers=headers)
+
+        await self._rate_limiter.acquire()
 
         try:
             response, content = await asyncio.to_thread(make_request)
@@ -245,8 +251,12 @@ class Calendar:
         if not os.path.exists(self.S_ACCOUNT_FILE):
             raise FileNotFoundError(f"Missing credentials file: {self.S_ACCOUNT_FILE}")
 
-        self._client = self._create_client()
-        self._client_lock = threading.Lock()
+        self._creds = Credentials.from_service_account_file(
+            self.S_ACCOUNT_FILE,
+            scopes=self.SCOPES,
+        )
+        self._client = self._build_service()
+        self._rate_limiter = AsyncRateLimiter()
 
     @staticmethod
     def normalize_summary(summary: str) -> str:
@@ -256,19 +266,19 @@ class Calendar:
     def is_similar(a: str, b: str, threshold: float = 0.65) -> bool:
         return difflib.SequenceMatcher(None, a, b).ratio() >= threshold
 
-    def _create_client(self):
-        creds = Credentials.from_service_account_file(
-            self.S_ACCOUNT_FILE,
-            scopes=self.SCOPES,
-        )
-        return build("calendar", "v3", credentials=creds)
+    def _build_service(self):
+        return build("calendar", "v3", credentials=self._creds)
 
-    async def _safe_execute(self, req):
-        def execute_with_lock():
-            with self._client_lock:
-                return req.execute()
+    async def _execute(self, req: HttpRequest) -> dict:
+        await self._rate_limiter.acquire()
 
-        return await asyncio.to_thread(execute_with_lock)
+        def run():
+            http = google_auth_httplib2.AuthorizedHttp(
+                self._creds, http=httplib2.Http()
+            )
+            return req.execute(http=http)
+
+        return await asyncio.to_thread(run)
 
     async def get_existing_events(self, target_date: dt.datetime) -> set[str]:
         try:
@@ -282,7 +292,7 @@ class Calendar:
                 singleEvents=True,
                 orderBy="startTime",
             )
-            result = await self._safe_execute(req)
+            result = await self._execute(req)
 
             existing_summaries = set()
             for event in result.get("items", []):
@@ -307,6 +317,11 @@ class Calendar:
             )
             return set()
 
+    async def _insert_event(self, ev: dict) -> str | None:
+        req = self._client.events().insert(calendarId=self._cal_id, body=ev)
+        result = await self._execute(req)
+        return result.get("htmlLink")
+
     async def publish(self, ev_date: dt.datetime, summary: str, link: str):
         ev = {
             "summary": summary,
@@ -319,24 +334,16 @@ class Calendar:
         }
 
         try:
-            req = self._client.events().insert(calendarId=self._cal_id, body=ev)
-            result = await self._safe_execute(req)
-            return result.get("htmlLink")
+            return await self._insert_event(ev)
         except Exception as e:
-            extra = {"attempt": 1}
             logger.warning(
-                "Calendar publish failed, recreating connection and retrying",
+                "Calendar publish failed, rebuilding service and retrying",
                 exc_info=e,
-                extra=extra,
             )
 
             try:
-                with self._client_lock:
-                    self._client = self._create_client()
-                req = self._client.events().insert(calendarId=self._cal_id, body=ev)
-                result = await self._safe_execute(req)
-                logger.info("Calendar publish succeeded", extra={"summary": summary})
-                return result.get("htmlLink")
+                self._client = self._build_service()
+                return await self._insert_event(ev)
             except Exception as retry_e:
                 logger.error("Calendar publish error after retry", exc_info=retry_e)
                 raise
@@ -399,10 +406,14 @@ async def setup_bot(
                 logger.error("Invalid event date format", exc_info=e, extra=extra)
                 continue
 
+        dates = list(events_by_date.keys())
+        summaries_per_date = await asyncio.gather(
+            *(calendar.get_existing_events(d) for d in dates)
+        )
+
         all_unique_events = []
-        for ev_date, date_events in events_by_date.items():
-            existing_summaries = await calendar.get_existing_events(ev_date)
-            for ev in date_events:
+        for ev_date, existing_summaries in zip(dates, summaries_per_date, strict=True):
+            for ev in events_by_date[ev_date]:
                 normalized_summary = calendar.normalize_summary(ev["summary"])
                 is_dup = any(
                     calendar.is_similar(normalized_summary, s)
@@ -425,7 +436,7 @@ async def setup_bot(
             logger.error("Forward message error", exc_info=e)
             return
 
-        for ev_date, ev in all_unique_events:
+        async def publish_one(ev_date, ev):
             try:
                 summary = ev["summary"]
                 cal_link = await calendar.publish(ev_date, summary, link)
@@ -433,6 +444,8 @@ async def setup_bot(
                 logger.info("Calendar publish success", extra=extra)
             except Exception as e:
                 logger.error("Calendar publish error", exc_info=e, extra={"event": ev})
+
+        await asyncio.gather(*(publish_one(d, ev) for d, ev in all_unique_events))
 
     logger.info("Bot started and listening...")
     await t.cast(t.Any, tg.run_until_disconnected())
