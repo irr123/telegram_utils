@@ -105,14 +105,13 @@ class AsyncRateLimiter:
 
 
 class OpenAICompatibleLLM:
-    BASE_URL = "https://opencode.ai/zen/v1"
+    BASE_URL = "https://openrouter.ai/api/v1"
     FALLBACK_MODELS = (
-        "big-pickle",
-        "gpt-5-nano",
-        "minimax-m2.5-free",
-        "mimo-v2-pro-free",
-        "qwen3.6-plus-free",
-        "nemotron-3-super-free",
+        "nvidia/nemotron-3.5-lightning:free",
+        "z-ai/glm-5.2:free",
+        "google/gemma-4-31b-it:free",
+        "qwen/qwen3.8-27b:free",
+        "liquid/lfm-2.5-2.6b:free",
     )
     MODEL = FALLBACK_MODELS[0]
 
@@ -453,7 +452,8 @@ async def setup_bot(
 
 async def main():
     cal_id = os.getenv("CALENDAR_ID")
-    api_key = os.getenv("OPENAI_COMPATIBLE_API_KEY")
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    assert api_key
     session_str = os.getenv("SESSION")
     assert session_str
     api_id = os.getenv("TG_API_ID")
@@ -465,7 +465,7 @@ async def main():
     llm = OpenAICompatibleLLM(api_key)
     session = StringSession(session_str)
 
-    async with TelegramClient(session, int(api_id), api_hash) as tg:
+    async with TelegramClient(session, int(api_id), api_hash, timeout=60) as tg:
         await setup_bot(
             tg,
             llm,
@@ -479,6 +479,7 @@ async def main():
                 "https://t.me/adaptacija",
                 "https://t.me/afisha_rs",
                 "https://t.me/airsoft_serbia",
+                "https://t.me/auditoria_belgrade",
                 "https://t.me/balkanoutdoor",
                 "https://t.me/beogradske_vesti",
                 "https://t.me/cofeek_vezde",
@@ -490,18 +491,18 @@ async def main():
                 "https://t.me/legiongamesrs",
                 "https://t.me/lepopishem",
                 "https://t.me/mapamagrus",
+                "https://t.me/neka_beograd",
+                "https://t.me/noda_space",
                 "https://t.me/obitaniya_sreda",
                 "https://t.me/poker_belgrade",
                 "https://t.me/sta_imas_beograd",
                 "https://t.me/standup_beo",
                 "https://t.me/tech_illumination",
+                "https://t.me/technoblok77",
                 "https://t.me/volna_srbjia",
                 "https://t.me/vstrechi_v_belgrade",
-                "https://t.me/zarko_tusic",
-                "https://t.me/noda_space",
                 "https://t.me/xecut_bg",
-                "https://t.me/neka_beograd",
-                "https://t.me/technoblok77",
+                "https://t.me/zarko_tusic",
             ),
         )
 

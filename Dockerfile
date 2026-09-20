@@ -15,7 +15,7 @@ RUN uv venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH
 
 COPY ./requirements.txt requirements.txt
-RUN uv pip install -r requirements.txt
+RUN uv pip install --compile-bytecode -r requirements.txt
 
 FROM $BASE_IMAGE
 
@@ -32,3 +32,5 @@ COPY --from=builder /opt/venv /opt/venv
 
 COPY . /opt/app
 WORKDIR /opt/app
+
+RUN python -m compileall -q -j 0 /opt/app
